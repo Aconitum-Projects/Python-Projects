@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -71,7 +72,7 @@ class MediaPipeFaceProcessor:
             running_mode=vision.RunningMode.IMAGE,
             num_faces=1,
             output_face_blendshapes=True,
-            output_facial_transformation_matrixes=False,
+            output_facial_transformation_matrixes=True,
         )
         self.detector = vision.FaceLandmarker.create_from_options(options)
         self.blink_mode = blink_mode
@@ -98,7 +99,19 @@ class MediaPipeFaceProcessor:
         else:
             blink_value = max(left, right)
 
-        return {"blink": blink_value}
+        # Direction du regard via matrice de transformation faciale
+        # Colonne 2 de la matrice de rotation = vecteur "vers l'avant" de la face en espace caméra
+        gaze_yaw   = 0.0
+        gaze_pitch = 0.0
+        if result.facial_transformation_matrixes:
+            M = result.facial_transformation_matrixes[0]
+            fwd_x = float(M[0][2])
+            fwd_y = float(M[1][2])
+            fwd_z = float(M[2][2])
+            gaze_yaw   = math.degrees(math.atan2(fwd_x, fwd_z))
+            gaze_pitch = math.degrees(math.atan2(fwd_y, math.sqrt(fwd_x ** 2 + fwd_z ** 2)))
+
+        return {"blink": blink_value, "gaze_yaw": gaze_yaw, "gaze_pitch": gaze_pitch}
 
     def stop(self):
         self.capture.release()

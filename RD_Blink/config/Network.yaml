@@ -16,7 +16,15 @@ OSC_output:
 blink_detection:
   threshold: 0.6          # seuil de fermeture (montée)
   threshold_off: 0.35     # seuil de réouverture (descente) — hysteresis anti-oscillation
-  pause_hold_seconds: 3.0  # secondes de fermeture continue pour basculer pause/reprise
+
+gaze_pause:
+  enabled: true
+  direction_pause: "right"   # regard à droite (physique) = mise en pause
+  direction_resume: "left"   # regard à gauche (physique) = reprise
+  yaw_threshold: 20
+  pitch_threshold: 0
+  cooldown_seconds: 1.5
+  debug_logs: true
 
 keyboard_trigger:
   enabled: true

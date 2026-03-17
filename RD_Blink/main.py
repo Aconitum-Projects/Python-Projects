@@ -10,17 +10,19 @@ class PauseNotifier:
     """Affiche un popup non-bloquant indiquant l'état pause ou reprise."""
 
     def show(self, paused: bool):
-        threading.Thread(target=self._show, args=(paused,), daemon=True).start()
+        text = "\u23f8  EN PAUSE" if paused else "\u25b6  REPRIS"
+        bg = "#E67E22" if paused else "#27AE60"
+        self.show_message(text=text, bg=bg)
 
-    def _show(self, paused: bool):
+    def show_message(self, text: str, bg: str = "#2C3E50"):
+        threading.Thread(target=self._show, args=(text, bg), daemon=True).start()
+
+    def _show(self, text: str, bg: str):
         try:
             root = tk.Tk()
             root.overrideredirect(True)
             root.attributes("-topmost", True)
             root.attributes("-alpha", 0.92)
-
-            text = "\u23f8  EN PAUSE" if paused else "\u25b6  REPRIS"
-            bg   = "#E67E22"       if paused else "#27AE60"
 
             label = tk.Label(
                 root, text=text, bg=bg, fg="white",
@@ -34,6 +36,26 @@ class PauseNotifier:
             sw = root.winfo_screenwidth()
             sh = root.winfo_screenheight()
             root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+            # Force le passage au premier plan via Win32 — nécessaire contre les jeux plein écran
+            root.update()
+            try:
+                import ctypes
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                HWND_TOPMOST   = -1
+                SWP_NOMOVE     = 0x0002
+                SWP_NOSIZE     = 0x0001
+                SWP_NOACTIVATE = 0x0010
+                # Récupère le HWND de la fenêtre Tkinter via son ID wm
+                tk_hwnd = ctypes.windll.user32.FindWindowW(None, None)
+                # Utilise l'id interne Tkinter pour forcer HWND_TOPMOST
+                wid = root.winfo_id()
+                ctypes.windll.user32.SetWindowPos(
+                    wid, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                )
+            except Exception:
+                pass
 
             root.after(2500, root.destroy)
             root.mainloop()
@@ -210,6 +232,20 @@ class BlinkKeyboardTrigger:
             return False
 
 
+def _check_gaze(direction: str, yaw: float, pitch: float, yaw_thr: float, pitch_thr: float) -> bool:
+    """Vérifie si le regard est dans une direction donnée.
+    direction: bottom_left, bottom_right, top_left, top_right, left, right, up, down
+    yaw: négatif = gauche, positif = droite  (en degrés)
+    pitch: signe dépend de la config MediaPipe — calibrer avec debug_logs: true
+    """
+    d = direction.replace("_", " ").lower()
+    if "left"   in d and yaw  > -yaw_thr:   return False
+    if "right"  in d and yaw  <  yaw_thr:   return False
+    if "bottom" in d and pitch > -pitch_thr: return False
+    if "top"    in d and pitch <  pitch_thr: return False
+    return True
+
+
 def main():
     print("--- DÉMARRAGE DU RELAIS (BLINK CAM -> OSC) ---")
 
@@ -252,39 +288,51 @@ def main():
     blink_cfg = config.get("blink_detection", {})
     blink_threshold     = float(blink_cfg.get("threshold", 0.6))
     blink_off_threshold = float(blink_cfg.get("threshold_off", 0.35))
-    pause_hold_seconds  = float(blink_cfg.get("pause_hold_seconds", 3.0))
     keyboard_cfg = config.get("keyboard_trigger", {})
     keyboard_trigger = BlinkKeyboardTrigger(keyboard_cfg)
     pause_notifier   = PauseNotifier()
 
+    gaze_cfg      = config.get("gaze_pause", {})
+    gaze_enabled  = bool(gaze_cfg.get("enabled", True))
+    gaze_dir_pause  = str(gaze_cfg.get("direction_pause",  "right")).lower()
+    gaze_dir_resume = str(gaze_cfg.get("direction_resume", "left" )).lower()
+    gaze_yaw_thr   = float(gaze_cfg.get("yaw_threshold", 20.0))
+    gaze_pitch_thr = float(gaze_cfg.get("pitch_threshold", 0.0))
+    gaze_cooldown  = float(gaze_cfg.get("cooldown_seconds", 1.5))
+    gaze_debug     = bool(gaze_cfg.get("debug_logs", True))
+
     print("--- SYSTÈME ACTIF ---")
     print("Appuyez sur Ctrl+C pour quitter.")
-    print(f"[Pause] Ferme les yeux {pause_hold_seconds:.0f}s pour basculer pause/reprise.")
+    if gaze_enabled:
+        print(f"[Pause] Regard '{gaze_dir_pause}' = pause | '{gaze_dir_resume}' = reprise.")
+        if gaze_debug:
+            print("[Gaze] debug_logs actif — valeurs yaw/pitch affichées en temps réel.")
 
-    premier_paquet  = False
-    was_blinking    = False
-    paused          = False
-    hold_start      = None   # horodatage du début de la fermeture en cours
-    blink_pending   = False  # clignement court en attente d'être déclenché
+    premier_paquet          = False
+    was_blinking            = False
+    paused                  = False
+    was_in_gaze_pause_pos   = False
+    was_in_gaze_resume_pos  = False
+    gaze_last_trigger       = 0.0
+    _gaze_log_count         = 0
 
     # 3. Boucle principale
     try:
         while True:
-            # Récupération d'un dictionnaire blink-only
             data_dict = processor.get_processed_data()
 
             if data_dict:
                 blink_value = float(data_dict.get("blink", 0.0))
+                gaze_yaw    = float(data_dict.get("gaze_yaw", 0.0))
+                gaze_pitch  = float(data_dict.get("gaze_pitch", 0.0))
 
-                # Hystérésis : on monte au-dessus de threshold, on redescend
-                # seulement sous threshold_off — évite les faux fronts
-                # causés par les oscillations quand les yeux restent fermés.
+                # Hystérésis blink
                 if blink_value >= blink_threshold:
                     is_blinking = True
                 elif blink_value < blink_off_threshold:
                     is_blinking = False
                 else:
-                    is_blinking = was_blinking  # zone tampon : pas de changement d'état
+                    is_blinking = was_blinking
 
                 if not premier_paquet:
                     print("[SUCCES] Flux blink detecte, envoi OSC en cours...")
@@ -292,29 +340,40 @@ def main():
 
                 sender.send_dict(data_dict)
 
-                if is_blinking:
-                    if not was_blinking:
-                        # Front montant — démarre le timer de maintien
-                        hold_start    = time.time()
-                        blink_pending = True
-                    else:
-                        # Maintien : vérifie si le seuil de pause est atteint
-                        if blink_pending and hold_start is not None:
-                            if time.time() - hold_start >= pause_hold_seconds:
-                                # Maintien long → bascule pause
-                                blink_pending = False
-                                paused = not paused
-                                pause_notifier.show(paused)
-                                print(f"[Pause] {'EN PAUSE' if paused else 'REPRIS'}")
-                else:
-                    if was_blinking:
-                        # Front descendant — clignement court terminé
-                        if blink_pending and not paused:
-                            keyboard_trigger.on_blink()
-                        blink_pending = False
-                        hold_start    = None
-
+                # — Clignement court : déclenche la touche sur front descendant
+                if not is_blinking and was_blinking and not paused:
+                    keyboard_trigger.on_blink()
                 was_blinking = is_blinking
+
+                # — Debug gaze (toutes les ~30 trames ≈ 300ms)
+                if gaze_debug and premier_paquet:
+                    _gaze_log_count += 1
+                    if _gaze_log_count % 30 == 0:
+                        status = "EN PAUSE" if paused else "actif"
+                        print(f"[Gaze] yaw={gaze_yaw:+.1f}°  pitch={gaze_pitch:+.1f}°  [{status}]")
+
+                # — Pause/reprise via flick du regard (directions séparées)
+                if gaze_enabled:
+                    now = time.time()
+                    in_pause_pos  = _check_gaze(gaze_dir_pause,  gaze_yaw, gaze_pitch, gaze_yaw_thr, gaze_pitch_thr)
+                    in_resume_pos = _check_gaze(gaze_dir_resume, gaze_yaw, gaze_pitch, gaze_yaw_thr, gaze_pitch_thr)
+
+                    if in_pause_pos and not was_in_gaze_pause_pos:
+                        if not paused and now - gaze_last_trigger >= gaze_cooldown:
+                            paused = True
+                            pause_notifier.show(paused)
+                            gaze_last_trigger = now
+                            print("[Pause] EN PAUSE")
+
+                    if in_resume_pos and not was_in_gaze_resume_pos:
+                        if paused and now - gaze_last_trigger >= gaze_cooldown:
+                            paused = False
+                            pause_notifier.show(paused)
+                            gaze_last_trigger = now
+                            print("[Pause] REPRIS")
+
+                    was_in_gaze_pause_pos  = in_pause_pos
+                    was_in_gaze_resume_pos = in_resume_pos
 
             time.sleep(0.01)
 
