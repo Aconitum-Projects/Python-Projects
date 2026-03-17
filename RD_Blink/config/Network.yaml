@@ -1,0 +1,31 @@
+mediapipe_info:
+  camera_index: 0
+  camera_fallback_indexes: [1, 2, 3]
+  frame_width: 1280
+  frame_height: 720
+  blink_mode: "max"  # max ou avg
+  model_path: "config/face_landmarker.task"
+  auto_download_model: true
+  model_url: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+
+OSC_output:
+  ip: "127.0.0.1"
+  port: 7000
+  base_address: "/blink"
+
+blink_detection:
+  threshold: 0.6          # seuil de fermeture (montée)
+  threshold_off: 0.35     # seuil de réouverture (descente) — hysteresis anti-oscillation
+  pause_hold_seconds: 3.0  # secondes de fermeture continue pour basculer pause/reprise
+
+keyboard_trigger:
+  enabled: true
+  window_title: "Rhythm Doctor"
+  key: "space"
+  hold_ms: 50
+  cooldown_ms: 120
+  focus_window: true
+  focus_delay_ms: 80
+  send_method: "auto"  # auto, directinput, pyautogui, win32
+  allow_method_fallback: true
+  debug_logs: true
