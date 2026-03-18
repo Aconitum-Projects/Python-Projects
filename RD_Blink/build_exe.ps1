@@ -46,11 +46,19 @@ uv run --with pyinstaller pyinstaller `
 $distDir = Join-Path $distRoot "RD_Blink"
 $configSource = Join-Path $PSScriptRoot "config"
 $configTarget = Join-Path $distDir "config"
+$iconsSource = Join-Path $PSScriptRoot "icons"
+$iconsTarget = Join-Path $distDir "icons"
 
 if (Test-Path $configTarget) {
   Remove-Item $configTarget -Recurse -Force
 }
 
 Copy-Item $configSource $configTarget -Recurse -Force
+
+if (Test-Path $iconsTarget) {
+  Remove-Item $iconsTarget -Recurse -Force
+}
+
+Copy-Item $iconsSource $iconsTarget -Recurse -Force
 
 Write-Host "Build termine. Executable: $distRoot\RD_Blink\RD_Blink.exe"

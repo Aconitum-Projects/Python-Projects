@@ -8,6 +8,13 @@ from tkinter import font as tkfont
 from PIL import Image, ImageTk
 
 
+def _get_project_root_path() -> str:
+    """Return the runtime project root for source and frozen builds."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 class AddonState:
     """Gère l'état de l'addon et notifie les observateurs."""
 
@@ -169,6 +176,7 @@ class AddonGUI:
         self.icon_size = (64, 64)
         self.icon_size_large = (96, 96)  # Larger size for toggle button
         self.icon_size_toggle = (132, 132)
+        self.icon_size_play = (56, 56)
         self.icons = self._load_icons()
         try:
             if self.icons.get("main") is not None:
@@ -358,19 +366,51 @@ class AddonGUI:
             popup.overrideredirect(True)
             popup.attributes("-topmost", True)
             popup.attributes("-alpha", 0.72)
-            popup.configure(bg="#000000")
+
+            popup_bg = "#6E8FB8"
+            mask_color = "#FF00FF"
+            popup.configure(bg=mask_color)
+            try:
+                # Windows: make mask color transparent so the rounded corners are truly cut out.
+                popup.attributes("-transparentcolor", mask_color)
+            except Exception:
+                mask_color = popup_bg
+                popup.configure(bg=popup_bg)
+
+            def _draw_round_rect(canvas, x1, y1, x2, y2, radius, fill):
+                r = max(0, min(radius, (x2 - x1) // 2, (y2 - y1) // 2))
+                canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="")
+                canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="")
+                canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, fill=fill, outline="")
+                canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, fill=fill, outline="")
+                canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, fill=fill, outline="")
+                canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, fill=fill, outline="")
 
             icon_key = popup_icon.get(action, "play_large")
             icon = self.icons.get(icon_key)
-            label = tk.Label(
+            icon_w = int(icon.width()) if icon is not None else 96
+            icon_h = int(icon.height()) if icon is not None else 96
+            pad_x = 14
+            pad_y = 14
+            popup_w = icon_w + (pad_x * 2)
+            popup_h = icon_h + (pad_y * 2)
+
+            canvas = tk.Canvas(
                 popup,
-                image=icon,
-                bg="#000000",
-                padx=12,
-                pady=12,
+                width=popup_w,
+                height=popup_h,
+                bg=mask_color,
+                bd=0,
+                highlightthickness=0,
+                relief="flat",
             )
-            label.image = icon
-            label.pack()
+            canvas.pack()
+
+            _draw_round_rect(canvas, 0, 0, popup_w, popup_h, radius=16, fill=popup_bg)
+
+            if icon is not None:
+                canvas.create_image(popup_w // 2, popup_h // 2, image=icon)
+                canvas.image = icon
 
             popup.update_idletasks()
             w = popup.winfo_reqwidth()
@@ -438,7 +478,7 @@ class AddonGUI:
             "hand_r_disabled": "Hand_R_Disabled.png",
         }
 
-        project_root = os.path.dirname(os.path.abspath(__file__))
+        project_root = _get_project_root_path()
         icons_dir = os.path.join(project_root, "icons")
 
         # Load regular and large icons
@@ -458,6 +498,18 @@ class AddonGUI:
                 except Exception as e:
                     if size_name is None:
                         print(f"[GUI] Erreur chargement icone {key}: {e}")
+
+        # Smaller variants for play/pause icon shown in the main UI.
+        for key, filename in (("play", "Play.png"), ("play_disabled", "Play_Disabled.png"), ("pause", "Pause.png")):
+            try:
+                filepath = os.path.join(icons_dir, filename)
+                if os.path.exists(filepath):
+                    img = Image.open(filepath)
+                    if img.size != self.icon_size_play:
+                        img = img.resize(self.icon_size_play, Image.Resampling.NEAREST)
+                    icons[f"{key}_small"] = ImageTk.PhotoImage(img)
+            except Exception as e:
+                print(f"[GUI] Erreur chargement icone {key}_small: {e}")
 
         # Idle eye animation frames are loaded from icons/animEye in sorted order.
         self._eye_anim_sequence_keys = []
@@ -488,7 +540,7 @@ class AddonGUI:
     def _setup_background_image(self):
         """Sets a background image behind all widgets when available."""
         try:
-            project_root = os.path.dirname(os.path.abspath(__file__))
+            project_root = _get_project_root_path()
             icons_dir = os.path.join(project_root, "icons")
             candidates = [
                 "Background.png",
@@ -551,8 +603,31 @@ class AddonGUI:
         self.right_hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
         self.right_hand_col.pack(side="left", padx=(18, 8))
 
-        self.pause_col = tk.Frame(self.center_col, bg="#2C3E50")
-        self.pause_col.pack(pady=(0, 8))
+        # Bouton On/Off centré en haut du bloc central
+        self.toggle_button_frame = tk.Frame(self.center_col, bg="#2C3E50")
+        self.toggle_button_frame.config(width=184, height=156)
+        self.toggle_button_frame.pack_propagate(False)
+        self.toggle_button_frame.pack(pady=(0, 8))
+
+        self.toggle_btn = tk.Button(
+            self.toggle_button_frame,
+            image=self.icons.get("off_toggle"),
+            bg="#2C3E50",
+            activebackground="#2C3E50",
+            bd=0,
+            highlightthickness=0,
+            command=self._on_toggle,
+            cursor="hand2"
+        )
+        self.toggle_btn.image = self.icons.get("off_toggle")
+        self.toggle_btn.place(relx=0.5, y=self._toggle_btn_base_y, anchor="n")
+
+        # Ligne inférieure: pause + blink côte à côte
+        self.center_bottom_row = tk.Frame(self.center_col, bg="#2C3E50")
+        self.center_bottom_row.pack()
+
+        self.pause_col = tk.Frame(self.center_bottom_row, bg="#2C3E50")
+        self.pause_col.pack(side="left", padx=(0, 12))
 
         self.pause_title = tk.Label(
             self.pause_col,
@@ -566,13 +641,13 @@ class AddonGUI:
         # Bouton Pause
         self.pause_btn = tk.Label(
             self.pause_col,
-            image=self.icons.get("play"),
+            image=self.icons.get("play_small"),
             bg="#2C3E50",
             bd=0,
             highlightthickness=0,
             relief="flat",
         )
-        self.pause_btn.image = self.icons.get("play")
+        self.pause_btn.image = self.icons.get("play_small")
         self.pause_btn.pack(pady=8)
 
         # Pause help texts with formatting
@@ -584,7 +659,7 @@ class AddonGUI:
             text="Turn head ",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.left_label.pack(side="left")
 
@@ -602,7 +677,7 @@ class AddonGUI:
             text=" to PAUSE",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.to_pause.pack(side="left")
 
@@ -615,7 +690,7 @@ class AddonGUI:
             text="Turn head ",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.right_label.pack(side="left")
 
@@ -633,31 +708,12 @@ class AddonGUI:
             text=" to PLAY",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.to_play.pack(side="left")
 
-        # Bouton On/Off centré entre Play et Blink
-        self.toggle_button_frame = tk.Frame(self.center_col, bg="#2C3E50")
-        self.toggle_button_frame.config(width=184, height=156)
-        self.toggle_button_frame.pack_propagate(False)
-        self.toggle_button_frame.pack(pady=self._toggle_base_pady)
-
-        self.toggle_btn = tk.Button(
-            self.toggle_button_frame,
-            image=self.icons.get("off_toggle"),
-            bg="#2C3E50",
-            activebackground="#2C3E50",
-            bd=0,
-            highlightthickness=0,
-            command=self._on_toggle,
-            cursor="hand2"
-        )
-        self.toggle_btn.image = self.icons.get("off_toggle")
-        self.toggle_btn.place(relx=0.5, y=self._toggle_btn_base_y, anchor="n")
-
-        self.blink_col = tk.Frame(self.center_col, bg="#2C3E50")
-        self.blink_col.pack(pady=(8, 0))
+        self.blink_col = tk.Frame(self.center_bottom_row, bg="#2C3E50")
+        self.blink_col.pack(side="left", padx=(12, 0))
 
         self.blink_title = tk.Label(
             self.blink_col,
@@ -685,7 +741,7 @@ class AddonGUI:
             text="Blink to CLICK",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.blink_help.pack(pady=(4, 0))
 
@@ -697,15 +753,6 @@ class AddonGUI:
             fg="#ECF0F1"
         )
         self.hand_title.pack(pady=(0, 8))
-
-        self.hand_state_label = tk.Label(
-            self.hand_col,
-            text="Left Hand",
-            font=("Arial", 8, "bold"),
-            bg="#2C3E50",
-            fg="#7F8C8D"
-        )
-        self.hand_state_label.pack(pady=(4, 0))
 
         self.hand_btn = tk.Label(
             self.hand_col,
@@ -720,12 +767,21 @@ class AddonGUI:
 
         self.hand_status_help = tk.Label(
             self.hand_col,
-            text="Disabled / Open / Closed / Thumb",
+            text="Close four fingers to go LEFT",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.hand_status_help.pack(pady=(2, 0))
+
+        self.hand_status_help2 = tk.Label(
+            self.hand_col,
+            text="Close left thumb to go DOWN",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#D8E5F7"
+        )
+        self.hand_status_help2.pack(pady=(1, 0))
 
         self.right_hand_title = tk.Label(
             self.right_hand_col,
@@ -735,15 +791,6 @@ class AddonGUI:
             fg="#ECF0F1"
         )
         self.right_hand_title.pack(pady=(0, 8))
-
-        self.right_hand_state_label = tk.Label(
-            self.right_hand_col,
-            text="Right Hand",
-            font=("Arial", 8, "bold"),
-            bg="#2C3E50",
-            fg="#7F8C8D"
-        )
-        self.right_hand_state_label.pack(pady=(4, 0))
 
         self.right_hand_btn = tk.Label(
             self.right_hand_col,
@@ -758,12 +805,21 @@ class AddonGUI:
 
         self.right_hand_status_help = tk.Label(
             self.right_hand_col,
-            text="Disabled / Open / Closed / Thumb",
+            text="Close four fingers to go RIGHT",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#D8E5F7"
         )
         self.right_hand_status_help.pack(pady=(2, 0))
+
+        self.right_hand_status_help2 = tk.Label(
+            self.right_hand_col,
+            text="Close right thumb to go UP",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#D8E5F7"
+        )
+        self.right_hand_status_help2.pack(pady=(1, 0))
 
         self.input_debug_frame = tk.Frame(self.root, bg="#2C3E50")
         self.input_debug_frame.pack(pady=(8, 0))
@@ -801,7 +857,7 @@ class AddonGUI:
             text="No input sent yet",
             font=("Arial", 8),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            fg="#FFFFFF"
         )
         self.input_debug_history.pack(pady=(5, 0))
 
@@ -818,10 +874,10 @@ class AddonGUI:
         """Met à jour l'interface en fonction de l'état."""
         try:
             # Couleurs pour les états
-            normal_color = "#ECF0F1"
-            normal_gray = "#7F8C8D"
-            faded_color = "#4A5568"
-            faded_gray = "#354560"
+            normal_color = "#FFFFFF"
+            normal_gray = "#FFFFFF"
+            faded_color = "#8FA3BC"
+            faded_gray = "#7D91AA"
 
             # Bouton On/Off
             if self.state.is_running:
@@ -842,21 +898,21 @@ class AddonGUI:
                 self.right_label.config(fg=faded_gray)
                 self.right_bold.config(fg=faded_color)
                 self.to_play.config(fg=faded_gray)
-                self.pause_btn.config(image=self.icons.get("play_disabled"))
-                self.pause_btn.image = self.icons.get("play_disabled")
+                self.pause_btn.config(image=self.icons.get("play_disabled_small"))
+                self.pause_btn.image = self.icons.get("play_disabled_small")
                 # Blink column
                 self.blink_title.config(fg=faded_color)
                 self.blink_help.config(fg=faded_gray)
                 self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                 self.blink_btn.image = self.icons.get("eye_open_disabled")
                 self.hand_title.config(fg=faded_color)
-                self.hand_state_label.config(fg=faded_color)
                 self.hand_status_help.config(fg=faded_gray)
+                self.hand_status_help2.config(fg=faded_gray)
                 self.hand_btn.config(image=self.icons.get("hand_l_disabled"))
                 self.hand_btn.image = self.icons.get("hand_l_disabled")
                 self.right_hand_title.config(fg=faded_color)
-                self.right_hand_state_label.config(fg=faded_color)
                 self.right_hand_status_help.config(fg=faded_gray)
+                self.right_hand_status_help2.config(fg=faded_gray)
                 self.right_hand_btn.config(image=self.icons.get("hand_r_disabled"))
                 self.right_hand_btn.image = self.icons.get("hand_r_disabled")
             else:
@@ -871,8 +927,8 @@ class AddonGUI:
                     self.right_bold.config(fg=faded_color)
                     self.to_play.config(fg=faded_gray)
                     # Play button normal
-                    self.pause_btn.config(image=self.icons.get("play"))
-                    self.pause_btn.image = self.icons.get("play")
+                    self.pause_btn.config(image=self.icons.get("play_small"))
+                    self.pause_btn.image = self.icons.get("play_small")
                     # Blink normal
                     self.blink_title.config(fg=normal_color)
                     self.blink_help.config(fg=normal_gray)
@@ -880,11 +936,11 @@ class AddonGUI:
                         self.blink_btn.config(image=self.icons.get("eye_open"))
                         self.blink_btn.image = self.icons.get("eye_open")
                     self.hand_title.config(fg=normal_color)
-                    self.hand_state_label.config(fg=normal_color)
                     self.hand_status_help.config(fg=normal_gray)
+                    self.hand_status_help2.config(fg=normal_gray)
                     self.right_hand_title.config(fg=normal_color)
-                    self.right_hand_state_label.config(fg=normal_color)
                     self.right_hand_status_help.config(fg=normal_gray)
+                    self.right_hand_status_help2.config(fg=normal_gray)
                 else:
                     # Si ON et Pause: fade left text, blink faded
                     self.left_label.config(fg=faded_gray)
@@ -895,19 +951,19 @@ class AddonGUI:
                     self.to_play.config(fg=normal_gray)
                     self.pause_title.config(fg=normal_color)
                     # Pause button normal
-                    self.pause_btn.config(image=self.icons.get("pause"))
-                    self.pause_btn.image = self.icons.get("pause")
+                    self.pause_btn.config(image=self.icons.get("pause_small"))
+                    self.pause_btn.image = self.icons.get("pause_small")
                     # Blink faded
                     self.blink_title.config(fg=faded_color)
                     self.blink_help.config(fg=faded_gray)
                     self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                     self.blink_btn.image = self.icons.get("eye_open_disabled")
                     self.hand_title.config(fg=faded_color)
-                    self.hand_state_label.config(fg=faded_color)
                     self.hand_status_help.config(fg=faded_gray)
+                    self.hand_status_help2.config(fg=faded_gray)
                     self.right_hand_title.config(fg=faded_color)
-                    self.right_hand_state_label.config(fg=faded_color)
                     self.right_hand_status_help.config(fg=faded_gray)
+                    self.right_hand_status_help2.config(fg=faded_gray)
 
                 left_icon_key = "hand_l_disabled"
                 if self.state.is_running and not self.state.is_paused and self.state.is_left_hand_detected:
@@ -1003,7 +1059,7 @@ class PauseNotifier:
             "play": "Play.png",
         }
 
-        project_root = os.path.dirname(os.path.abspath(__file__))
+        project_root = _get_project_root_path()
         icons_dir = os.path.join(project_root, "icons")
 
         for key, filename in icon_files.items():
