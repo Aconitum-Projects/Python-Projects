@@ -17,6 +17,24 @@ blink_detection:
   threshold: 0.6          # seuil de fermeture (montée)
   threshold_off: 0.35     # seuil de réouverture (descente) — hysteresis anti-oscillation
 
+left_hand_detection:
+  enabled: true
+  min_closed_fingers: 4         # index, majeur, annulaire, auriculaire
+  finger_closed_margin: 0.015   # marge anti-bruit (coordonnees normalisees)
+  thumb_closed_ratio: 0.75      # plus petit = pouce plus proche de la paume requis
+  min_detection_confidence: 0.6
+  min_tracking_confidence: 0.5
+  min_presence_confidence: 0.5
+  model_path: "config/hand_landmarker.task"
+  auto_download_model: true
+  model_url: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+  invert_handedness: false      # passer a true si la gauche/droite est inversée
+
+right_hand_detection:
+  enabled: true
+  # Les autres valeurs héritent de left_hand_detection.
+  # Tu peux override ici si besoin: min_closed_fingers, finger_closed_margin, thumb_closed_ratio, etc.
+
 gaze_pause:
   enabled: true
   direction_pause: "right"   # regard à droite (physique) = mise en pause

@@ -15,6 +15,12 @@ class AddonState:
         self.is_running = False
         self.is_paused = False
         self.is_blinking = False
+        self.is_left_hand_detected = False
+        self.is_left_hand_closed = False
+        self.is_left_thumb_closed = False
+        self.is_right_hand_detected = False
+        self.is_right_hand_closed = False
+        self.is_right_thumb_closed = False
         self.status_message = "Addon arrete"
         self.blink_cooldown = 0.3
         self.last_blink_time = 0.0
@@ -38,6 +44,12 @@ class AddonState:
             if not running:
                 self.is_paused = False
                 self.is_blinking = False
+                self.is_left_hand_detected = False
+                self.is_left_hand_closed = False
+                self.is_left_thumb_closed = False
+                self.is_right_hand_detected = False
+                self.is_right_hand_closed = False
+                self.is_right_thumb_closed = False
             self.notify_observers()
 
     def set_paused(self, paused: bool):
@@ -67,6 +79,32 @@ class AddonState:
             self.status_message = message
             self.notify_observers()
 
+    def set_left_hand_state(self, detected: bool, closed: bool, thumb_closed: bool = False):
+        closed = bool(closed and detected)
+        thumb_closed = bool(thumb_closed and detected)
+        if (
+            self.is_left_hand_detected != bool(detected)
+            or self.is_left_hand_closed != closed
+            or self.is_left_thumb_closed != thumb_closed
+        ):
+            self.is_left_hand_detected = bool(detected)
+            self.is_left_hand_closed = closed
+            self.is_left_thumb_closed = thumb_closed
+            self.notify_observers()
+
+    def set_right_hand_state(self, detected: bool, closed: bool, thumb_closed: bool = False):
+        closed = bool(closed and detected)
+        thumb_closed = bool(thumb_closed and detected)
+        if (
+            self.is_right_hand_detected != bool(detected)
+            or self.is_right_hand_closed != closed
+            or self.is_right_thumb_closed != thumb_closed
+        ):
+            self.is_right_hand_detected = bool(detected)
+            self.is_right_hand_closed = closed
+            self.is_right_thumb_closed = thumb_closed
+            self.notify_observers()
+
     def _reset_blink(self):
         self.set_blinking(False)
 
@@ -86,7 +124,7 @@ class AddonGUI:
         self._last_paused = state.is_paused
 
         self.root.title("Rhythm Doctor Accessibility Addon")
-        self.root.geometry("600x520")
+        self.root.geometry("760x520")
         self.root.resizable(False, False)
         self.root.configure(bg="#2C3E50")
 
@@ -419,6 +457,122 @@ class AddonGUI:
         )
         self.blink_help.pack(pady=(4, 0))
 
+        self.hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
+        self.hand_col.pack(side="left", padx=12)
+
+        self.hand_title = tk.Label(
+            self.hand_col,
+            text="Left Hand",
+            font=("Arial", 11, "bold"),
+            bg="#2C3E50",
+            fg="#ECF0F1"
+        )
+        self.hand_title.pack(pady=(0, 8))
+
+        self.hand_indicator = tk.Canvas(
+            self.hand_col,
+            width=46,
+            height=46,
+            bg="#2C3E50",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.hand_indicator.pack(pady=8)
+        self.hand_indicator_dot = self.hand_indicator.create_oval(
+            4,
+            4,
+            42,
+            42,
+            fill="#4A5568",
+            outline="#2C3E50",
+            width=2,
+        )
+
+        self.hand_state_label = tk.Label(
+            self.hand_col,
+            text="No hand",
+            font=("Arial", 8, "bold"),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.hand_state_label.pack(pady=(4, 0))
+
+        self.hand_thumb_label = tk.Label(
+            self.hand_col,
+            text="Thumb: -",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.hand_thumb_label.pack(pady=(2, 0))
+
+        self.hand_help = tk.Label(
+            self.hand_col,
+            text="Close 4 fingers",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.hand_help.pack(pady=(2, 0))
+
+        self.right_hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
+        self.right_hand_col.pack(side="left", padx=12)
+
+        self.right_hand_title = tk.Label(
+            self.right_hand_col,
+            text="Right Hand",
+            font=("Arial", 11, "bold"),
+            bg="#2C3E50",
+            fg="#ECF0F1"
+        )
+        self.right_hand_title.pack(pady=(0, 8))
+
+        self.right_hand_indicator = tk.Canvas(
+            self.right_hand_col,
+            width=46,
+            height=46,
+            bg="#2C3E50",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.right_hand_indicator.pack(pady=8)
+        self.right_hand_indicator_dot = self.right_hand_indicator.create_oval(
+            4,
+            4,
+            42,
+            42,
+            fill="#4A5568",
+            outline="#2C3E50",
+            width=2,
+        )
+
+        self.right_hand_state_label = tk.Label(
+            self.right_hand_col,
+            text="No hand",
+            font=("Arial", 8, "bold"),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.right_hand_state_label.pack(pady=(4, 0))
+
+        self.right_hand_thumb_label = tk.Label(
+            self.right_hand_col,
+            text="Thumb: -",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.right_hand_thumb_label.pack(pady=(2, 0))
+
+        self.right_hand_help = tk.Label(
+            self.right_hand_col,
+            text="Close 4 fingers",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.right_hand_help.pack(pady=(2, 0))
+
     def _on_toggle(self):
         """Appelle le callback de basculement."""
         if self.on_toggle_callback:
@@ -462,6 +616,16 @@ class AddonGUI:
                 self.blink_help.config(fg=faded_gray)
                 self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                 self.blink_btn.image = self.icons.get("eye_open_disabled")
+                self.hand_title.config(fg=faded_color)
+                self.hand_state_label.config(text="No hand", fg=faded_gray)
+                self.hand_thumb_label.config(text="Thumb: -", fg=faded_gray)
+                self.hand_help.config(fg=faded_gray)
+                self.hand_indicator.itemconfig(self.hand_indicator_dot, fill="#4A5568")
+                self.right_hand_title.config(fg=faded_color)
+                self.right_hand_state_label.config(text="No hand", fg=faded_gray)
+                self.right_hand_thumb_label.config(text="Thumb: -", fg=faded_gray)
+                self.right_hand_help.config(fg=faded_gray)
+                self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill="#4A5568")
             else:
                 # Si ON et Playing: fade right text, blink normal
                 if not self.state.is_paused:
@@ -481,6 +645,12 @@ class AddonGUI:
                     self.blink_help.config(fg=normal_gray)
                     self.blink_btn.config(image=self.icons.get("eye_open"))
                     self.blink_btn.image = self.icons.get("eye_open")
+                    self.hand_title.config(fg=normal_color)
+                    self.hand_thumb_label.config(fg=normal_gray)
+                    self.hand_help.config(fg=normal_gray)
+                    self.right_hand_title.config(fg=normal_color)
+                    self.right_hand_thumb_label.config(fg=normal_gray)
+                    self.right_hand_help.config(fg=normal_gray)
                 else:
                     # Si ON et Pause: fade left text, blink faded
                     self.left_label.config(fg=faded_gray)
@@ -498,6 +668,70 @@ class AddonGUI:
                     self.blink_help.config(fg=faded_gray)
                     self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                     self.blink_btn.image = self.icons.get("eye_open_disabled")
+                    self.hand_title.config(fg=faded_color)
+                    self.hand_thumb_label.config(fg=faded_gray)
+                    self.hand_help.config(fg=faded_gray)
+                    self.right_hand_title.config(fg=faded_color)
+                    self.right_hand_thumb_label.config(fg=faded_gray)
+                    self.right_hand_help.config(fg=faded_gray)
+
+                if self.state.is_left_hand_detected:
+                    if self.state.is_left_hand_closed:
+                        hand_text = "Closed"
+                        hand_color = "#27AE60"
+                    else:
+                        hand_text = "Open"
+                        hand_color = "#E67E22"
+                else:
+                    hand_text = "No hand"
+                    hand_color = "#7F8C8D"
+
+                if self.state.is_paused:
+                    self.hand_state_label.config(text=hand_text, fg=faded_gray)
+                    self.hand_thumb_label.config(
+                        text="Thumb: Closed" if self.state.is_left_thumb_closed else "Thumb: Open",
+                        fg=faded_gray,
+                    )
+                    self.hand_indicator.itemconfig(self.hand_indicator_dot, fill="#4A5568")
+                else:
+                    self.hand_state_label.config(text=hand_text, fg=normal_gray)
+                    self.hand_thumb_label.config(
+                        text="Thumb: Closed" if self.state.is_left_thumb_closed else "Thumb: Open",
+                        fg=normal_gray,
+                    )
+                    self.hand_indicator.itemconfig(self.hand_indicator_dot, fill=hand_color)
+
+                if not self.state.is_left_hand_detected:
+                    self.hand_thumb_label.config(text="Thumb: -")
+
+                if self.state.is_right_hand_detected:
+                    if self.state.is_right_hand_closed:
+                        right_hand_text = "Closed"
+                        right_hand_color = "#27AE60"
+                    else:
+                        right_hand_text = "Open"
+                        right_hand_color = "#E67E22"
+                else:
+                    right_hand_text = "No hand"
+                    right_hand_color = "#7F8C8D"
+
+                if self.state.is_paused:
+                    self.right_hand_state_label.config(text=right_hand_text, fg=faded_gray)
+                    self.right_hand_thumb_label.config(
+                        text="Thumb: Closed" if self.state.is_right_thumb_closed else "Thumb: Open",
+                        fg=faded_gray,
+                    )
+                    self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill="#4A5568")
+                else:
+                    self.right_hand_state_label.config(text=right_hand_text, fg=normal_gray)
+                    self.right_hand_thumb_label.config(
+                        text="Thumb: Closed" if self.state.is_right_thumb_closed else "Thumb: Open",
+                        fg=normal_gray,
+                    )
+                    self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill=right_hand_color)
+
+                if not self.state.is_right_hand_detected:
+                    self.right_hand_thumb_label.config(text="Thumb: -")
 
             # Bouton Blink state change
             if self.state.is_blinking:
@@ -880,6 +1114,8 @@ class AddonController:
         self.state.set_running(False)
         self.state.set_paused(False)
         self.state.set_blinking(False)
+        self.state.set_left_hand_state(False, False)
+        self.state.set_right_hand_state(False, False)
         self.state.set_status_message("Addon arrete")
 
     def _run_loop(self):
@@ -922,6 +1158,8 @@ class AddonController:
             blink_cfg = config.get("blink_detection", {})
             blink_threshold = float(blink_cfg.get("threshold", 0.6))
             blink_off_threshold = float(blink_cfg.get("threshold_off", 0.35))
+            blink_trigger_edge = str(blink_cfg.get("trigger_edge", "press")).lower()
+            loop_sleep_seconds = float(blink_cfg.get("loop_sleep_seconds", 0.005))
             keyboard_cfg = config.get("keyboard_trigger", {})
             keyboard_trigger = BlinkKeyboardTrigger(keyboard_cfg)
 
@@ -941,17 +1179,26 @@ class AddonController:
             gaze_last_trigger = 0.0
             gaze_log_count = 0
 
-            self.state.set_status_message("Actif - regard gauche/droite pour pause/reprise")
+            self.state.set_status_message("Actif - blink + regard + mains gauche/droite")
 
             while not self._stop_event.is_set():
                 data_dict = processor.get_processed_data()
                 if not data_dict:
-                    time.sleep(0.01)
+                    time.sleep(max(loop_sleep_seconds, 0.001))
                     continue
 
                 blink_value = float(data_dict.get("blink", 0.0))
                 gaze_yaw = float(data_dict.get("gaze_yaw", 0.0))
                 gaze_pitch = float(data_dict.get("gaze_pitch", 0.0))
+                left_hand_detected = bool(data_dict.get("left_hand_detected", 0.0) >= 0.5)
+                left_hand_closed = bool(data_dict.get("left_hand_closed", 0.0) >= 0.5)
+                left_thumb_closed = bool(data_dict.get("left_thumb_closed", 0.0) >= 0.5)
+                right_hand_detected = bool(data_dict.get("right_hand_detected", 0.0) >= 0.5)
+                right_hand_closed = bool(data_dict.get("right_hand_closed", 0.0) >= 0.5)
+                right_thumb_closed = bool(data_dict.get("right_thumb_closed", 0.0) >= 0.5)
+
+                self.state.set_left_hand_state(left_hand_detected, left_hand_closed, left_thumb_closed)
+                self.state.set_right_hand_state(right_hand_detected, right_hand_closed, right_thumb_closed)
 
                 if blink_value >= blink_threshold:
                     is_blinking = True
@@ -962,7 +1209,19 @@ class AddonController:
 
                 sender.send_dict(data_dict)
 
-                if not is_blinking and was_blinking and not paused:
+                blink_rising_edge = is_blinking and not was_blinking
+                blink_falling_edge = (not is_blinking) and was_blinking
+
+                should_trigger_blink = False
+                if blink_trigger_edge in ("press", "rising", "close", "closed"):
+                    should_trigger_blink = blink_rising_edge
+                elif blink_trigger_edge in ("release", "falling", "open"):
+                    should_trigger_blink = blink_falling_edge
+                else:
+                    # Fallback sécurisé: comportement instantané.
+                    should_trigger_blink = blink_rising_edge
+
+                if should_trigger_blink and not paused:
                     if keyboard_trigger.on_blink():
                         self.state.set_blinking(True)
                 was_blinking = is_blinking
@@ -1006,7 +1265,7 @@ class AddonController:
                     if gaze_log_count % 30 == 0:
                         print(f"[Gaze] yaw={gaze_yaw:+.1f} pitch={gaze_pitch:+.1f} paused={paused}")
 
-                time.sleep(0.01)
+                time.sleep(max(loop_sleep_seconds, 0.001))
 
         except Exception as exc:
             self.state.set_status_message(f"Erreur: {exc}")
@@ -1020,6 +1279,8 @@ class AddonController:
             self.state.set_running(False)
             self.state.set_paused(False)
             self.state.set_blinking(False)
+            self.state.set_left_hand_state(False, False)
+            self.state.set_right_hand_state(False, False)
 
             if not self._stop_event.is_set() and not self.state.status_message.startswith("Erreur"):
                 self.state.set_status_message("Addon arrete")

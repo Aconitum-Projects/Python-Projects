@@ -11,6 +11,9 @@ from mediapipe.tasks.python import vision
 class MediaPipeFaceProcessor:
     def __init__(self, config: dict):
         mp_cfg = config.get("mediapipe_info", {})
+        left_hand_cfg = dict(config.get("left_hand_detection", {}))
+        right_hand_cfg = dict(left_hand_cfg)
+        right_hand_cfg.update(config.get("right_hand_detection", {}))
         project_root = Path(config.get("project_root", Path.cwd()))
 
         camera_index = int(mp_cfg.get("camera_index", 0))
@@ -76,6 +79,81 @@ class MediaPipeFaceProcessor:
         )
         self.detector = vision.FaceLandmarker.create_from_options(options)
         self.blink_mode = blink_mode
+        self.left_hand_enabled = bool(left_hand_cfg.get("enabled", True))
+        self.right_hand_enabled = bool(right_hand_cfg.get("enabled", True))
+        self.left_hand_finger_closed_margin = float(left_hand_cfg.get("finger_closed_margin", 0.015))
+        self.right_hand_finger_closed_margin = float(right_hand_cfg.get("finger_closed_margin", 0.015))
+        self.left_hand_min_closed_fingers = int(left_hand_cfg.get("min_closed_fingers", 4))
+        self.right_hand_min_closed_fingers = int(right_hand_cfg.get("min_closed_fingers", 4))
+        self.left_thumb_closed_ratio = float(left_hand_cfg.get("thumb_closed_ratio", 0.75))
+        self.right_thumb_closed_ratio = float(right_hand_cfg.get("thumb_closed_ratio", 0.75))
+        self.hand_invert_handedness = bool(left_hand_cfg.get("invert_handedness", False))
+        self.hand_detector = None
+
+        if self.left_hand_enabled or self.right_hand_enabled:
+            hand_model_path = Path(left_hand_cfg.get("model_path", "config/hand_landmarker.task"))
+            hand_model_url = left_hand_cfg.get(
+                "model_url",
+                "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+            )
+            hand_auto_download_model = bool(left_hand_cfg.get("auto_download_model", True))
+
+            if not hand_model_path.is_absolute():
+                hand_model_path = project_root / hand_model_path
+
+            if not hand_model_path.exists():
+                if hand_auto_download_model:
+                    hand_model_path.parent.mkdir(parents=True, exist_ok=True)
+                    print(f"[MediaPipe] Telechargement du modele main vers: {hand_model_path}")
+                    urlretrieve(hand_model_url, hand_model_path)
+                else:
+                    raise FileNotFoundError(
+                        f"[MediaPipe] Modele main introuvable: {hand_model_path}. "
+                        "Ajoutez le fichier .task ou activez auto_download_model."
+                    )
+
+            hand_options = vision.HandLandmarkerOptions(
+                base_options=python.BaseOptions(model_asset_path=str(hand_model_path)),
+                running_mode=vision.RunningMode.IMAGE,
+                num_hands=2,
+                min_hand_detection_confidence=float(left_hand_cfg.get("min_detection_confidence", 0.6)),
+                min_tracking_confidence=float(left_hand_cfg.get("min_tracking_confidence", 0.5)),
+                min_hand_presence_confidence=float(left_hand_cfg.get("min_presence_confidence", 0.5)),
+            )
+            self.hand_detector = vision.HandLandmarker.create_from_options(hand_options)
+
+    def _is_finger_closed(self, landmarks, tip_idx: int, pip_idx: int, margin: float) -> bool:
+        """A finger is considered closed when its tip is clearly below its PIP joint."""
+        tip = landmarks[tip_idx]
+        pip = landmarks[pip_idx]
+        return tip.y > (pip.y + margin)
+
+    def _is_hand_closed(self, landmarks, margin: float, min_closed_fingers: int) -> bool:
+        # index, middle, ring, pinky
+        closed_count = 0
+        finger_pairs = ((8, 6), (12, 10), (16, 14), (20, 18))
+        for tip_idx, pip_idx in finger_pairs:
+            if self._is_finger_closed(landmarks, tip_idx, pip_idx, margin):
+                closed_count += 1
+        return closed_count >= min_closed_fingers
+
+    def _is_thumb_closed(self, landmarks, closed_ratio: float) -> bool:
+        """Thumb is closed when tip is close enough to palm center, normalized by palm width."""
+        thumb_tip = landmarks[4]
+        wrist = landmarks[0]
+        index_mcp = landmarks[5]
+        pinky_mcp = landmarks[17]
+
+        palm_center_x = (wrist.x + index_mcp.x + pinky_mcp.x) / 3.0
+        palm_center_y = (wrist.y + index_mcp.y + pinky_mcp.y) / 3.0
+
+        dist_tip_to_palm = math.hypot(thumb_tip.x - palm_center_x, thumb_tip.y - palm_center_y)
+        palm_width = math.hypot(index_mcp.x - pinky_mcp.x, index_mcp.y - pinky_mcp.y)
+
+        if palm_width <= 1e-6:
+            return False
+
+        return dist_tip_to_palm <= (palm_width * closed_ratio)
 
     def get_processed_data(self) -> dict:
         ok, frame = self.capture.read()
@@ -111,8 +189,76 @@ class MediaPipeFaceProcessor:
             gaze_yaw   = math.degrees(math.atan2(fwd_x, fwd_z))
             gaze_pitch = math.degrees(math.atan2(fwd_y, math.sqrt(fwd_x ** 2 + fwd_z ** 2)))
 
-        return {"blink": blink_value, "gaze_yaw": gaze_yaw, "gaze_pitch": gaze_pitch}
+        left_hand_detected = False
+        left_hand_closed = False
+        left_thumb_closed = False
+        right_hand_detected = False
+        right_hand_closed = False
+        right_thumb_closed = False
+
+        if (self.left_hand_enabled or self.right_hand_enabled) and self.hand_detector is not None:
+            hand_result = self.hand_detector.detect(mp_image)
+            if hand_result.hand_landmarks and hand_result.handedness:
+                for hand_landmarks, hand_handedness in zip(
+                    hand_result.hand_landmarks,
+                    hand_result.handedness,
+                ):
+                    hand_label = str(hand_handedness[0].category_name).lower()
+                    if self.hand_invert_handedness:
+                        hand_label = "left" if hand_label == "right" else "right"
+
+                    if hand_label == "left":
+                        left_hand_detected = True
+                        left_hand_closed = self._is_hand_closed(
+                            hand_landmarks,
+                            self.left_hand_finger_closed_margin,
+                            self.left_hand_min_closed_fingers,
+                        )
+                        left_thumb_closed = self._is_thumb_closed(
+                            hand_landmarks,
+                            self.left_thumb_closed_ratio,
+                        )
+                    elif hand_label == "right":
+                        right_hand_detected = True
+                        right_hand_closed = self._is_hand_closed(
+                            hand_landmarks,
+                            self.right_hand_finger_closed_margin,
+                            self.right_hand_min_closed_fingers,
+                        )
+                        right_thumb_closed = self._is_thumb_closed(
+                            hand_landmarks,
+                            self.right_thumb_closed_ratio,
+                        )
+
+                    if (not self.left_hand_enabled or left_hand_detected) and (
+                        not self.right_hand_enabled or right_hand_detected
+                    ):
+                        break
+
+        if not self.left_hand_enabled:
+            left_hand_detected = False
+            left_hand_closed = False
+            left_thumb_closed = False
+
+        if not self.right_hand_enabled:
+            right_hand_detected = False
+            right_hand_closed = False
+            right_thumb_closed = False
+
+        return {
+            "blink": blink_value,
+            "gaze_yaw": gaze_yaw,
+            "gaze_pitch": gaze_pitch,
+            "left_hand_detected": 1.0 if left_hand_detected else 0.0,
+            "left_hand_closed": 1.0 if left_hand_closed else 0.0,
+            "left_thumb_closed": 1.0 if left_thumb_closed else 0.0,
+            "right_hand_detected": 1.0 if right_hand_detected else 0.0,
+            "right_hand_closed": 1.0 if right_hand_closed else 0.0,
+            "right_thumb_closed": 1.0 if right_thumb_closed else 0.0,
+        }
 
     def stop(self):
         self.capture.release()
+        if self.hand_detector is not None:
+            self.hand_detector.close()
         self.detector.close()
