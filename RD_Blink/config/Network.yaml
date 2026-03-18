@@ -16,6 +16,10 @@ OSC_output:
 blink_detection:
   threshold: 0.6          # seuil de fermeture (montée)
   threshold_off: 0.35     # seuil de réouverture (descente) — hysteresis anti-oscillation
+  trigger_edge: "press"  # press/rising = instantané, release/falling = au relâchement
+  loop_sleep_seconds: 0.005
+  rearm_threshold: 0.48   # rearm plus tôt pour accepter les clignements rapides
+  min_trigger_interval_ms: 70
 
 left_hand_detection:
   enabled: true
@@ -44,14 +48,33 @@ gaze_pause:
   cooldown_seconds: 1.5
   debug_logs: true
 
+pause_trigger:
+  enabled: true
+  key: "esc"
+  force_win32: true
+  fallback_win32_direct: true
+  cooldown_ms: 120
+  hold_ms: 45
+
 keyboard_trigger:
   enabled: true
   window_title: "Rhythm Doctor"
+  exclude_window_substrings: ["Accessibility Addon"]
   key: "space"
   hold_ms: 50
-  cooldown_ms: 120
+  cooldown_ms: 70
   focus_window: true
   focus_delay_ms: 80
   send_method: "auto"  # auto, directinput, pyautogui, win32
   allow_method_fallback: true
   debug_logs: true
+
+hand_trigger:
+  enabled: true
+  allow_when_paused: false
+  left_hand_key: "left"
+  right_hand_key: "right"
+  left_thumb_key: "down"
+  right_thumb_key: "up"
+  cooldown_ms: 70
+  hold_ms: 45

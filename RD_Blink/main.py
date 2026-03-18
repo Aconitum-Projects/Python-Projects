@@ -24,6 +24,14 @@ class AddonState:
         self.status_message = "Addon arrete"
         self.blink_cooldown = 0.3
         self.last_blink_time = 0.0
+        self.input_flash_window_seconds = 0.22
+        self.last_input_times = {
+            "L": 0.0,
+            "R": 0.0,
+            "U": 0.0,
+            "D": 0.0,
+        }
+        self.input_history = []
         self.observers = []
 
     def add_observer(self, callback):
@@ -50,6 +58,8 @@ class AddonState:
                 self.is_right_hand_detected = False
                 self.is_right_hand_closed = False
                 self.is_right_thumb_closed = False
+                self.last_input_times = {"L": 0.0, "R": 0.0, "U": 0.0, "D": 0.0}
+                self.input_history = []
             self.notify_observers()
 
     def set_paused(self, paused: bool):
@@ -105,6 +115,18 @@ class AddonState:
             self.is_right_thumb_closed = thumb_closed
             self.notify_observers()
 
+    def register_game_input(self, action: str):
+        token = str(action).upper()
+        if token not in self.last_input_times:
+            return
+
+        now = time.time()
+        self.last_input_times[token] = now
+        timestamp = time.strftime("%H:%M:%S", time.localtime(now))
+        self.input_history.append(f"{timestamp} {token}")
+        self.input_history = self.input_history[-8:]
+        self.notify_observers()
+
     def _reset_blink(self):
         self.set_blinking(False)
 
@@ -119,9 +141,24 @@ class AddonGUI:
         self._popup_window = None
         self._popup_destroy_job = None
         self._popup_bounce_job = None
+        self._periodic_refresh_job = None
+        self._toggle_bounce_job = None
+        self._toggle_bounce_anim_job = None
+        self._toggle_bounce_interval_ms = 4800
+        self._toggle_bounce_step_delay_ms = 55
+        self._toggle_base_pady = 12
+        self._toggle_btn_base_y = 10
+        self._eye_idle_anim_job = None
+        self._eye_anim_running = False
+        self._eye_idle_delay_ms = 3200
+        self._eye_anim_frame_delay_ms = 90
+        self._eye_anim_sequence_keys = []
         self._ui_initialized = False
         self._last_running = state.is_running
         self._last_paused = state.is_paused
+        self._background_label = None
+        self._background_image = None
+        self._widget_bg = "#2C3E50"
 
         self.root.title("Rhythm Doctor Accessibility Addon")
         self.root.geometry("760x520")
@@ -131,6 +168,7 @@ class AddonGUI:
         # Charger les icônes
         self.icon_size = (64, 64)
         self.icon_size_large = (96, 96)  # Larger size for toggle button
+        self.icon_size_toggle = (132, 132)
         self.icons = self._load_icons()
         try:
             if self.icons.get("main") is not None:
@@ -138,10 +176,140 @@ class AddonGUI:
         except Exception:
             pass
 
+        self._setup_background_image()
+
         # Observer aux changements d'état
         self.state.add_observer(self._on_state_changed)
 
         self._build_ui()
+        self._apply_widget_backgrounds()
+        self._schedule_periodic_refresh()
+        self._schedule_toggle_bounce()
+        self._schedule_eye_idle_animation()
+
+    def _apply_widget_backgrounds(self):
+        """Apply a unified widget background color to reduce panel-like blocks over the background image."""
+        def _apply(widget):
+            if widget is self._background_label:
+                return
+
+            try:
+                if isinstance(widget, (tk.Frame, tk.Label, tk.Button)):
+                    widget.configure(bg=self._widget_bg)
+                if isinstance(widget, tk.Button):
+                    widget.configure(activebackground=self._widget_bg)
+            except Exception:
+                pass
+
+            for child in widget.winfo_children():
+                _apply(child)
+
+        _apply(self.root)
+
+    def _schedule_periodic_refresh(self):
+        """Refresh UI regularly for transient visual cues (e.g. input flash)."""
+        self._update_ui()
+        self._periodic_refresh_job = self.root.after(120, self._schedule_periodic_refresh)
+
+    def _set_toggle_bounce_offset(self, offset: int):
+        if hasattr(self, "toggle_button_frame") and self.toggle_button_frame is not None:
+            self.toggle_btn.place_configure(y=max(self._toggle_btn_base_y + int(offset), 0))
+
+    def _play_toggle_bounce(self):
+        if not self.state.is_running:
+            self._set_toggle_bounce_offset(0)
+            self._toggle_bounce_anim_job = None
+            return
+
+        # Two short in-place jumps before waiting for the next cycle.
+        single_jump = (-3, -8, -12, -8, -3, 1, 0)
+        offsets = single_jump + (0, 0, 0) + single_jump
+
+        def _step(idx: int):
+            if not self.state.is_running:
+                self._set_toggle_bounce_offset(0)
+                self._toggle_bounce_anim_job = None
+                return
+
+            self._set_toggle_bounce_offset(offsets[idx])
+            if idx + 1 < len(offsets):
+                self._toggle_bounce_anim_job = self.root.after(
+                    self._toggle_bounce_step_delay_ms,
+                    lambda: _step(idx + 1),
+                )
+            else:
+                self._set_toggle_bounce_offset(0)
+                self._toggle_bounce_anim_job = None
+
+        _step(0)
+
+    def _schedule_toggle_bounce(self):
+        if self.state.is_running and self._toggle_bounce_anim_job is None:
+            self._play_toggle_bounce()
+        elif not self.state.is_running:
+            self._set_toggle_bounce_offset(0)
+
+        self._toggle_bounce_job = self.root.after(
+            self._toggle_bounce_interval_ms,
+            self._schedule_toggle_bounce,
+        )
+
+    def _can_play_eye_idle_animation(self) -> bool:
+        return bool(self.state.is_running and (not self.state.is_paused) and (not self.state.is_blinking))
+
+    def _schedule_eye_idle_animation(self):
+        if self._eye_idle_anim_job is not None:
+            try:
+                self.root.after_cancel(self._eye_idle_anim_job)
+            except Exception:
+                pass
+            self._eye_idle_anim_job = None
+
+        self._eye_idle_anim_job = self.root.after(self._eye_idle_delay_ms, self._maybe_play_eye_idle_animation)
+
+    def _maybe_play_eye_idle_animation(self):
+        self._eye_idle_anim_job = None
+
+        # If the required sprites are missing, keep normal behavior.
+        has_sequence = len(self._eye_anim_sequence_keys) > 0 and all(
+            self.icons.get(key) is not None for key in self._eye_anim_sequence_keys
+        )
+        if not has_sequence:
+            self._schedule_eye_idle_animation()
+            return
+
+        if self._eye_anim_running or (not self._can_play_eye_idle_animation()):
+            self._schedule_eye_idle_animation()
+            return
+
+        self._play_eye_idle_animation()
+
+    def _play_eye_idle_animation(self):
+        self._eye_anim_running = True
+
+        def _step(idx: int):
+            if not self._can_play_eye_idle_animation():
+                self._eye_anim_running = False
+                self.blink_btn.config(image=self.icons.get("eye_open"))
+                self.blink_btn.image = self.icons.get("eye_open")
+                self._schedule_eye_idle_animation()
+                return
+
+            if idx < len(self._eye_anim_sequence_keys):
+                icon_key = self._eye_anim_sequence_keys[idx]
+                icon = self.icons.get(icon_key)
+                if icon is not None:
+                    self.blink_btn.config(image=icon)
+                    self.blink_btn.image = icon
+                self.root.after(self._eye_anim_frame_delay_ms, lambda: _step(idx + 1))
+                return
+
+            self.blink_btn.config(image=self.icons.get("eye_open"))
+            self.blink_btn.image = self.icons.get("eye_open")
+            self._eye_anim_running = False
+            self._schedule_eye_idle_animation()
+
+        _step(0)
 
     def _close_action_popup(self):
         if self._popup_destroy_job is not None:
@@ -260,19 +428,29 @@ class AddonGUI:
             "eye_open_disabled": "Eye_open_Disabled.png",
             "eye_closed": "Eye_Closed.png",
             "eye_closed_disabled": "Eye_Closed_Disabled.png",
+            "hand_l_open": "Hand_L_Open.png",
+            "hand_l_closed": "Hand_L_Closed.png",
+            "hand_l_thumb_closed": "Hand_L_ThumbClosed.png",
+            "hand_l_disabled": "Hand_L_Disabled.png",
+            "hand_r_open": "Hand_R_Open.png",
+            "hand_r_closed": "Hand_R_Closed.png",
+            "hand_r_thumb_closed": "Hand_R_ThumbClosed.png",
+            "hand_r_disabled": "Hand_R_Disabled.png",
         }
 
         project_root = os.path.dirname(os.path.abspath(__file__))
         icons_dir = os.path.join(project_root, "icons")
 
         # Load regular and large icons
-        for size_name, size in [(None, self.icon_size), ("_large", self.icon_size_large)]:
+        for size_name, size in [(None, self.icon_size), ("_large", self.icon_size_large), ("_toggle", self.icon_size_toggle)]:
             for key, filename in icon_files.items():
                 try:
                     filepath = os.path.join(icons_dir, filename)
                     if os.path.exists(filepath):
                         img = Image.open(filepath)
-                        img = img.resize(size, Image.Resampling.LANCZOS)
+                        if img.size != size:
+                            # Keep sprite rendering crisp: no smoothing filter.
+                            img = img.resize(size, Image.Resampling.NEAREST)
                         icon_key = f"{key}{size_name}" if size_name else key
                         icons[icon_key] = ImageTk.PhotoImage(img)
                     elif size_name is None:
@@ -281,20 +459,75 @@ class AddonGUI:
                     if size_name is None:
                         print(f"[GUI] Erreur chargement icone {key}: {e}")
 
+        # Idle eye animation frames are loaded from icons/animEye in sorted order.
+        self._eye_anim_sequence_keys = []
+        anim_eye_dir = os.path.join(icons_dir, "animEye")
+        try:
+            if os.path.isdir(anim_eye_dir):
+                valid_ext = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+                frame_files = sorted(
+                    f for f in os.listdir(anim_eye_dir)
+                    if os.path.splitext(f)[1].lower() in valid_ext
+                )
+
+                for idx, filename in enumerate(frame_files, start=1):
+                    frame_path = os.path.join(anim_eye_dir, filename)
+                    img = Image.open(frame_path)
+                    if img.size != self.icon_size:
+                        img = img.resize(self.icon_size, Image.Resampling.NEAREST)
+                    icon_key = f"eye_look_{idx:02d}"
+                    icons[icon_key] = ImageTk.PhotoImage(img)
+                    self._eye_anim_sequence_keys.append(icon_key)
+            else:
+                print(f"[GUI] Dossier animation oeil introuvable: {anim_eye_dir}")
+        except Exception as e:
+            print(f"[GUI] Erreur chargement animEye: {e}")
+
         return icons
+
+    def _setup_background_image(self):
+        """Sets a background image behind all widgets when available."""
+        try:
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            icons_dir = os.path.join(project_root, "icons")
+            candidates = [
+                "Background.png",
+                "Background.jpg",
+                "Background.jpeg",
+                "background.png",
+                "background.jpg",
+                "background.jpeg",
+            ]
+            background_path = None
+
+            for filename in candidates:
+                candidate = os.path.join(icons_dir, filename)
+                if os.path.exists(candidate):
+                    background_path = candidate
+                    break
+
+            if background_path is None:
+                return
+
+            bg_img = Image.open(background_path)
+            target_size = (760, 520)
+            if bg_img.size != target_size:
+                bg_img = bg_img.resize(target_size, Image.Resampling.NEAREST)
+
+            # Use center pixel as the UI background key color to avoid visible blue panels.
+            sample = bg_img.convert("RGB").getpixel((target_size[0] // 2, target_size[1] // 2))
+            self._widget_bg = f"#{sample[0]:02x}{sample[1]:02x}{sample[2]:02x}"
+            self.root.configure(bg=self._widget_bg)
+
+            self._background_image = ImageTk.PhotoImage(bg_img)
+            self._background_label = tk.Label(self.root, image=self._background_image, bd=0)
+            self._background_label.place(x=0, y=0, relwidth=1, relheight=1)
+            self._background_label.lower()
+        except Exception as exc:
+            print(f"[GUI] Erreur fond: {exc}")
 
     def _build_ui(self):
         """Construit l'interface utilisateur."""
-        main_logo = self.icons.get("main_large")
-        if main_logo is not None:
-            main_logo_label = tk.Label(
-                self.root,
-                image=main_logo,
-                bg="#2C3E50",
-            )
-            main_logo_label.image = main_logo
-            main_logo_label.pack(pady=(12, 6))
-
         # Titre
         title_font = tkfont.Font(family="Arial", size=17, weight="bold")
         title_label = tk.Label(
@@ -304,34 +537,22 @@ class AddonGUI:
             bg="#2C3E50",
             fg="#ECF0F1"
         )
-        title_label.pack(pady=(10, 14))
-
-        # Bouton On/Off (plus gros)
-        button_frame = tk.Frame(self.root, bg="#2C3E50")
-        button_frame.pack(pady=12)
-
-        self.toggle_btn = tk.Button(
-            button_frame,
-            image=self.icons.get("off_large"),
-            bg="#2C3E50",
-            activebackground="#2C3E50",
-            bd=0,
-            highlightthickness=0,
-            command=self._on_toggle,
-            cursor="hand2"
-        )
-        self.toggle_btn.image = self.icons.get("off_large")
-        self.toggle_btn.pack()
-
-        # Séparateur
-        separator = tk.Frame(self.root, height=2, bg="#34495E")
-        separator.pack(fill="x", pady=10)
+        title_label.pack(pady=(18, 14))
 
         self.state_frame = tk.Frame(self.root, bg="#2C3E50")
-        self.state_frame.pack(pady=10)
+        self.state_frame.pack(pady=(4, 8))
 
-        self.pause_col = tk.Frame(self.state_frame, bg="#2C3E50")
-        self.pause_col.pack(side="left", padx=12)
+        self.hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
+        self.hand_col.pack(side="left", padx=(8, 18))
+
+        self.center_col = tk.Frame(self.state_frame, bg="#2C3E50")
+        self.center_col.pack(side="left", padx=6)
+
+        self.right_hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
+        self.right_hand_col.pack(side="left", padx=(18, 8))
+
+        self.pause_col = tk.Frame(self.center_col, bg="#2C3E50")
+        self.pause_col.pack(pady=(0, 8))
 
         self.pause_title = tk.Label(
             self.pause_col,
@@ -343,17 +564,13 @@ class AddonGUI:
         self.pause_title.pack(pady=(0, 8))
 
         # Bouton Pause
-        self.pause_btn = tk.Button(
+        self.pause_btn = tk.Label(
             self.pause_col,
             image=self.icons.get("play"),
             bg="#2C3E50",
-            activebackground="#2C3E50",
             bd=0,
             highlightthickness=0,
             relief="flat",
-            state="disabled",
-            cursor="arrow",
-            takefocus=0
         )
         self.pause_btn.image = self.icons.get("play")
         self.pause_btn.pack(pady=8)
@@ -420,8 +637,27 @@ class AddonGUI:
         )
         self.to_play.pack(side="left")
 
-        self.blink_col = tk.Frame(self.state_frame, bg="#2C3E50")
-        self.blink_col.pack(side="left", padx=12)
+        # Bouton On/Off centré entre Play et Blink
+        self.toggle_button_frame = tk.Frame(self.center_col, bg="#2C3E50")
+        self.toggle_button_frame.config(width=184, height=156)
+        self.toggle_button_frame.pack_propagate(False)
+        self.toggle_button_frame.pack(pady=self._toggle_base_pady)
+
+        self.toggle_btn = tk.Button(
+            self.toggle_button_frame,
+            image=self.icons.get("off_toggle"),
+            bg="#2C3E50",
+            activebackground="#2C3E50",
+            bd=0,
+            highlightthickness=0,
+            command=self._on_toggle,
+            cursor="hand2"
+        )
+        self.toggle_btn.image = self.icons.get("off_toggle")
+        self.toggle_btn.place(relx=0.5, y=self._toggle_btn_base_y, anchor="n")
+
+        self.blink_col = tk.Frame(self.center_col, bg="#2C3E50")
+        self.blink_col.pack(pady=(8, 0))
 
         self.blink_title = tk.Label(
             self.blink_col,
@@ -433,32 +669,25 @@ class AddonGUI:
         self.blink_title.pack(pady=(0, 8))
 
         # Bouton Blink
-        self.blink_btn = tk.Button(
+        self.blink_btn = tk.Label(
             self.blink_col,
             image=self.icons.get("eye_open"),
             bg="#2C3E50",
-            activebackground="#2C3E50",
             bd=0,
             highlightthickness=0,
             relief="flat",
-            state="disabled",
-            cursor="arrow",
-            takefocus=0
         )
         self.blink_btn.image = self.icons.get("eye_open")
         self.blink_btn.pack(pady=8)
 
         self.blink_help = tk.Label(
             self.blink_col,
-            text="Blink to click",
+            text="Blink to CLICK",
             font=("Arial", 8),
             bg="#2C3E50",
             fg="#7F8C8D"
         )
         self.blink_help.pack(pady=(4, 0))
-
-        self.hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
-        self.hand_col.pack(side="left", padx=12)
 
         self.hand_title = tk.Label(
             self.hand_col,
@@ -469,54 +698,34 @@ class AddonGUI:
         )
         self.hand_title.pack(pady=(0, 8))
 
-        self.hand_indicator = tk.Canvas(
-            self.hand_col,
-            width=46,
-            height=46,
-            bg="#2C3E50",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.hand_indicator.pack(pady=8)
-        self.hand_indicator_dot = self.hand_indicator.create_oval(
-            4,
-            4,
-            42,
-            42,
-            fill="#4A5568",
-            outline="#2C3E50",
-            width=2,
-        )
-
         self.hand_state_label = tk.Label(
             self.hand_col,
-            text="No hand",
+            text="Left Hand",
             font=("Arial", 8, "bold"),
             bg="#2C3E50",
             fg="#7F8C8D"
         )
         self.hand_state_label.pack(pady=(4, 0))
 
-        self.hand_thumb_label = tk.Label(
+        self.hand_btn = tk.Label(
             self.hand_col,
-            text="Thumb: -",
+            image=self.icons.get("hand_l_disabled"),
+            bg="#2C3E50",
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.hand_btn.image = self.icons.get("hand_l_disabled")
+        self.hand_btn.pack(pady=8)
+
+        self.hand_status_help = tk.Label(
+            self.hand_col,
+            text="Disabled / Open / Closed / Thumb",
             font=("Arial", 8),
             bg="#2C3E50",
             fg="#7F8C8D"
         )
-        self.hand_thumb_label.pack(pady=(2, 0))
-
-        self.hand_help = tk.Label(
-            self.hand_col,
-            text="Close 4 fingers",
-            font=("Arial", 8),
-            bg="#2C3E50",
-            fg="#7F8C8D"
-        )
-        self.hand_help.pack(pady=(2, 0))
-
-        self.right_hand_col = tk.Frame(self.state_frame, bg="#2C3E50")
-        self.right_hand_col.pack(side="left", padx=12)
+        self.hand_status_help.pack(pady=(2, 0))
 
         self.right_hand_title = tk.Label(
             self.right_hand_col,
@@ -527,51 +736,74 @@ class AddonGUI:
         )
         self.right_hand_title.pack(pady=(0, 8))
 
-        self.right_hand_indicator = tk.Canvas(
-            self.right_hand_col,
-            width=46,
-            height=46,
-            bg="#2C3E50",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.right_hand_indicator.pack(pady=8)
-        self.right_hand_indicator_dot = self.right_hand_indicator.create_oval(
-            4,
-            4,
-            42,
-            42,
-            fill="#4A5568",
-            outline="#2C3E50",
-            width=2,
-        )
-
         self.right_hand_state_label = tk.Label(
             self.right_hand_col,
-            text="No hand",
+            text="Right Hand",
             font=("Arial", 8, "bold"),
             bg="#2C3E50",
             fg="#7F8C8D"
         )
         self.right_hand_state_label.pack(pady=(4, 0))
 
-        self.right_hand_thumb_label = tk.Label(
+        self.right_hand_btn = tk.Label(
             self.right_hand_col,
-            text="Thumb: -",
-            font=("Arial", 8),
+            image=self.icons.get("hand_r_disabled"),
             bg="#2C3E50",
-            fg="#7F8C8D"
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
         )
-        self.right_hand_thumb_label.pack(pady=(2, 0))
+        self.right_hand_btn.image = self.icons.get("hand_r_disabled")
+        self.right_hand_btn.pack(pady=8)
 
-        self.right_hand_help = tk.Label(
+        self.right_hand_status_help = tk.Label(
             self.right_hand_col,
-            text="Close 4 fingers",
+            text="Disabled / Open / Closed / Thumb",
             font=("Arial", 8),
             bg="#2C3E50",
             fg="#7F8C8D"
         )
-        self.right_hand_help.pack(pady=(2, 0))
+        self.right_hand_status_help.pack(pady=(2, 0))
+
+        self.input_debug_frame = tk.Frame(self.root, bg="#2C3E50")
+        self.input_debug_frame.pack(pady=(8, 0))
+
+        self.input_debug_title = tk.Label(
+            self.input_debug_frame,
+            text="Game Inputs",
+            font=("Arial", 10, "bold"),
+            bg="#2C3E50",
+            fg="#ECF0F1"
+        )
+        self.input_debug_title.pack(pady=(0, 4))
+
+        self.input_lights_frame = tk.Frame(self.input_debug_frame, bg="#2C3E50")
+        self.input_lights_frame.pack()
+
+        self.input_light_labels = {}
+        for token in ("L", "D", "U", "R"):
+            lbl = tk.Label(
+                self.input_lights_frame,
+                text=token,
+                font=("Arial", 9, "bold"),
+                width=3,
+                bg="#4A5568",
+                fg="#ECF0F1",
+                relief="flat",
+                padx=4,
+                pady=2,
+            )
+            lbl.pack(side="left", padx=4)
+            self.input_light_labels[token] = lbl
+
+        self.input_debug_history = tk.Label(
+            self.input_debug_frame,
+            text="No input sent yet",
+            font=("Arial", 8),
+            bg="#2C3E50",
+            fg="#7F8C8D"
+        )
+        self.input_debug_history.pack(pady=(5, 0))
 
     def _on_toggle(self):
         """Appelle le callback de basculement."""
@@ -593,11 +825,12 @@ class AddonGUI:
 
             # Bouton On/Off
             if self.state.is_running:
-                self.toggle_btn.config(image=self.icons.get("on_large"))
-                self.toggle_btn.image = self.icons.get("on_large")
+                self.toggle_btn.config(image=self.icons.get("on_toggle"))
+                self.toggle_btn.image = self.icons.get("on_toggle")
             else:
-                self.toggle_btn.config(image=self.icons.get("off_large"))
-                self.toggle_btn.image = self.icons.get("off_large")
+                self.toggle_btn.config(image=self.icons.get("off_toggle"))
+                self.toggle_btn.image = self.icons.get("off_toggle")
+                self._set_toggle_bounce_offset(0)
 
             # Si OFF: tout grisé/peu visible
             if not self.state.is_running:
@@ -617,15 +850,15 @@ class AddonGUI:
                 self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                 self.blink_btn.image = self.icons.get("eye_open_disabled")
                 self.hand_title.config(fg=faded_color)
-                self.hand_state_label.config(text="No hand", fg=faded_gray)
-                self.hand_thumb_label.config(text="Thumb: -", fg=faded_gray)
-                self.hand_help.config(fg=faded_gray)
-                self.hand_indicator.itemconfig(self.hand_indicator_dot, fill="#4A5568")
+                self.hand_state_label.config(fg=faded_color)
+                self.hand_status_help.config(fg=faded_gray)
+                self.hand_btn.config(image=self.icons.get("hand_l_disabled"))
+                self.hand_btn.image = self.icons.get("hand_l_disabled")
                 self.right_hand_title.config(fg=faded_color)
-                self.right_hand_state_label.config(text="No hand", fg=faded_gray)
-                self.right_hand_thumb_label.config(text="Thumb: -", fg=faded_gray)
-                self.right_hand_help.config(fg=faded_gray)
-                self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill="#4A5568")
+                self.right_hand_state_label.config(fg=faded_color)
+                self.right_hand_status_help.config(fg=faded_gray)
+                self.right_hand_btn.config(image=self.icons.get("hand_r_disabled"))
+                self.right_hand_btn.image = self.icons.get("hand_r_disabled")
             else:
                 # Si ON et Playing: fade right text, blink normal
                 if not self.state.is_paused:
@@ -643,14 +876,15 @@ class AddonGUI:
                     # Blink normal
                     self.blink_title.config(fg=normal_color)
                     self.blink_help.config(fg=normal_gray)
-                    self.blink_btn.config(image=self.icons.get("eye_open"))
-                    self.blink_btn.image = self.icons.get("eye_open")
+                    if not self._eye_anim_running:
+                        self.blink_btn.config(image=self.icons.get("eye_open"))
+                        self.blink_btn.image = self.icons.get("eye_open")
                     self.hand_title.config(fg=normal_color)
-                    self.hand_thumb_label.config(fg=normal_gray)
-                    self.hand_help.config(fg=normal_gray)
+                    self.hand_state_label.config(fg=normal_color)
+                    self.hand_status_help.config(fg=normal_gray)
                     self.right_hand_title.config(fg=normal_color)
-                    self.right_hand_thumb_label.config(fg=normal_gray)
-                    self.right_hand_help.config(fg=normal_gray)
+                    self.right_hand_state_label.config(fg=normal_color)
+                    self.right_hand_status_help.config(fg=normal_gray)
                 else:
                     # Si ON et Pause: fade left text, blink faded
                     self.left_label.config(fg=faded_gray)
@@ -669,69 +903,33 @@ class AddonGUI:
                     self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
                     self.blink_btn.image = self.icons.get("eye_open_disabled")
                     self.hand_title.config(fg=faded_color)
-                    self.hand_thumb_label.config(fg=faded_gray)
-                    self.hand_help.config(fg=faded_gray)
+                    self.hand_state_label.config(fg=faded_color)
+                    self.hand_status_help.config(fg=faded_gray)
                     self.right_hand_title.config(fg=faded_color)
-                    self.right_hand_thumb_label.config(fg=faded_gray)
-                    self.right_hand_help.config(fg=faded_gray)
+                    self.right_hand_state_label.config(fg=faded_color)
+                    self.right_hand_status_help.config(fg=faded_gray)
 
-                if self.state.is_left_hand_detected:
-                    if self.state.is_left_hand_closed:
-                        hand_text = "Closed"
-                        hand_color = "#27AE60"
+                left_icon_key = "hand_l_disabled"
+                if self.state.is_running and not self.state.is_paused and self.state.is_left_hand_detected:
+                    if self.state.is_left_thumb_closed:
+                        left_icon_key = "hand_l_thumb_closed"
+                    elif self.state.is_left_hand_closed:
+                        left_icon_key = "hand_l_closed"
                     else:
-                        hand_text = "Open"
-                        hand_color = "#E67E22"
-                else:
-                    hand_text = "No hand"
-                    hand_color = "#7F8C8D"
+                        left_icon_key = "hand_l_open"
+                self.hand_btn.config(image=self.icons.get(left_icon_key))
+                self.hand_btn.image = self.icons.get(left_icon_key)
 
-                if self.state.is_paused:
-                    self.hand_state_label.config(text=hand_text, fg=faded_gray)
-                    self.hand_thumb_label.config(
-                        text="Thumb: Closed" if self.state.is_left_thumb_closed else "Thumb: Open",
-                        fg=faded_gray,
-                    )
-                    self.hand_indicator.itemconfig(self.hand_indicator_dot, fill="#4A5568")
-                else:
-                    self.hand_state_label.config(text=hand_text, fg=normal_gray)
-                    self.hand_thumb_label.config(
-                        text="Thumb: Closed" if self.state.is_left_thumb_closed else "Thumb: Open",
-                        fg=normal_gray,
-                    )
-                    self.hand_indicator.itemconfig(self.hand_indicator_dot, fill=hand_color)
-
-                if not self.state.is_left_hand_detected:
-                    self.hand_thumb_label.config(text="Thumb: -")
-
-                if self.state.is_right_hand_detected:
-                    if self.state.is_right_hand_closed:
-                        right_hand_text = "Closed"
-                        right_hand_color = "#27AE60"
+                right_icon_key = "hand_r_disabled"
+                if self.state.is_running and not self.state.is_paused and self.state.is_right_hand_detected:
+                    if self.state.is_right_thumb_closed:
+                        right_icon_key = "hand_r_thumb_closed"
+                    elif self.state.is_right_hand_closed:
+                        right_icon_key = "hand_r_closed"
                     else:
-                        right_hand_text = "Open"
-                        right_hand_color = "#E67E22"
-                else:
-                    right_hand_text = "No hand"
-                    right_hand_color = "#7F8C8D"
-
-                if self.state.is_paused:
-                    self.right_hand_state_label.config(text=right_hand_text, fg=faded_gray)
-                    self.right_hand_thumb_label.config(
-                        text="Thumb: Closed" if self.state.is_right_thumb_closed else "Thumb: Open",
-                        fg=faded_gray,
-                    )
-                    self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill="#4A5568")
-                else:
-                    self.right_hand_state_label.config(text=right_hand_text, fg=normal_gray)
-                    self.right_hand_thumb_label.config(
-                        text="Thumb: Closed" if self.state.is_right_thumb_closed else "Thumb: Open",
-                        fg=normal_gray,
-                    )
-                    self.right_hand_indicator.itemconfig(self.right_hand_indicator_dot, fill=right_hand_color)
-
-                if not self.state.is_right_hand_detected:
-                    self.right_hand_thumb_label.config(text="Thumb: -")
+                        right_icon_key = "hand_r_open"
+                self.right_hand_btn.config(image=self.icons.get(right_icon_key))
+                self.right_hand_btn.image = self.icons.get(right_icon_key)
 
             # Bouton Blink state change
             if self.state.is_blinking:
@@ -766,6 +964,24 @@ class AddonGUI:
 
             self._last_running = self.state.is_running
             self._last_paused = self.state.is_paused
+
+            # Debug visuel des inputs jeu (L/R/U/D)
+            active_color = "#27AE60" if self.state.is_running else "#4A5568"
+            idle_color = "#4A5568"
+            now = time.time()
+            for token, label in self.input_light_labels.items():
+                is_active = (
+                    self.state.is_running
+                    and (now - float(self.state.last_input_times.get(token, 0.0)))
+                    <= self.state.input_flash_window_seconds
+                )
+                label.config(bg=active_color if is_active else idle_color)
+
+            if self.state.input_history:
+                history_tail = " | ".join(self.state.input_history[-5:])
+                self.input_debug_history.config(text=history_tail)
+            else:
+                self.input_debug_history.config(text="No input sent yet")
         except Exception as e:
             print(f"[GUI] Erreur mise à jour: {e}")
 
@@ -898,6 +1114,10 @@ class BlinkKeyboardTrigger:
     def __init__(self, config: dict):
         self.enabled = bool(config.get("enabled", True))
         self.window_title = str(config.get("window_title", "Rhythm Doctor"))
+        excluded = config.get("exclude_window_substrings", ["accessibility addon"])
+        if isinstance(excluded, str):
+            excluded = [excluded]
+        self.exclude_window_substrings = [str(x).strip().lower() for x in excluded if str(x).strip()]
         self.key = str(config.get("key", "space"))
         self.hold_ms = int(config.get("hold_ms", 50))
         self.cooldown_ms = int(config.get("cooldown_ms", 120))
@@ -963,6 +1183,8 @@ class BlinkKeyboardTrigger:
         key_norm = key.strip().lower()
         special = {
             "space": 0x20,
+            "esc": 0x1B,
+            "escape": 0x1B,
             "enter": 0x0D,
             "left": 0x25,
             "up": 0x26,
@@ -1011,14 +1233,41 @@ class BlinkKeyboardTrigger:
         if not windows:
             raise RuntimeError(f"Fenetre introuvable: '{self.window_title}'")
 
-        game_window = windows[0]
+        target = self.window_title.strip().lower()
+        candidates = []
+        for window in windows:
+            title = str(getattr(window, "title", "") or "")
+            title_l = title.lower()
+            if any(excl in title_l for excl in self.exclude_window_substrings):
+                continue
+
+            if title_l == target:
+                score = 300
+            elif title_l.startswith(target):
+                score = 200
+            else:
+                score = 100
+            score += min(len(title), 99)
+            candidates.append((score, window, title))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, game_window, game_title = candidates[0]
+        else:
+            # Dernier recours: prend le premier resultat si tous les autres sont exclus.
+            game_window = windows[0]
+            game_title = str(getattr(game_window, "title", "") or "")
+
         game_window.activate()
 
         # Force foreground in case activate() is ignored by Windows focus rules.
         hwnd = getattr(game_window, "_hWnd", None)
         if hwnd:
-            self.user32.ShowWindow(hwnd, 5)
+            self.user32.ShowWindow(hwnd, 9)
             self.user32.SetForegroundWindow(hwnd)
+
+        if self.debug_logs:
+            print(f"[Keyboard] Focus cible='{game_title}'")
 
         time.sleep(max(self.focus_delay_ms, 0) / 1000.0)
 
@@ -1056,7 +1305,7 @@ class BlinkKeyboardTrigger:
                     active_title = "" if active is None else str(active.title)
                 except Exception:
                     active_title = ""
-                print(f"[Keyboard] Blink -> touche envoyee ({sent_method}), active='{active_title}'")
+                print(f"[Keyboard] Trigger -> touche envoyee ({sent_method}), active='{active_title}'")
             return True
         except Exception as exc:
             print(f"[Keyboard] Erreur trigger: {exc}")
@@ -1160,8 +1409,87 @@ class AddonController:
             blink_off_threshold = float(blink_cfg.get("threshold_off", 0.35))
             blink_trigger_edge = str(blink_cfg.get("trigger_edge", "press")).lower()
             loop_sleep_seconds = float(blink_cfg.get("loop_sleep_seconds", 0.005))
+            blink_rearm_threshold = float(
+                blink_cfg.get("rearm_threshold", max(blink_off_threshold, blink_threshold - 0.12))
+            )
+            blink_min_trigger_interval_ms = int(blink_cfg.get("min_trigger_interval_ms", 70))
             keyboard_cfg = config.get("keyboard_trigger", {})
             keyboard_trigger = BlinkKeyboardTrigger(keyboard_cfg)
+
+            hand_trigger_cfg = config.get("hand_trigger", {})
+            hand_trigger_enabled = bool(hand_trigger_cfg.get("enabled", True))
+            hand_trigger_allow_when_paused = bool(hand_trigger_cfg.get("allow_when_paused", False))
+
+            pause_trigger_cfg = config.get("pause_trigger", {})
+            pause_trigger_enabled = bool(pause_trigger_cfg.get("enabled", True))
+            pause_force_win32 = bool(pause_trigger_cfg.get("force_win32", True))
+            pause_fallback_win32_direct = bool(pause_trigger_cfg.get("fallback_win32_direct", True))
+
+            pause_key_cfg = dict(keyboard_cfg)
+            pause_key_cfg["enabled"] = pause_trigger_enabled
+            pause_key_cfg["key"] = str(pause_trigger_cfg.get("key", "esc"))
+            for field in (
+                "window_title",
+                "hold_ms",
+                "cooldown_ms",
+                "focus_window",
+                "focus_delay_ms",
+                "send_method",
+                "allow_method_fallback",
+                "debug_logs",
+            ):
+                if field in pause_trigger_cfg:
+                    pause_key_cfg[field] = pause_trigger_cfg[field]
+            if pause_force_win32:
+                pause_key_cfg["send_method"] = "win32"
+                pause_key_cfg["allow_method_fallback"] = False
+            pause_key_trigger = BlinkKeyboardTrigger(pause_key_cfg)
+
+            def _send_pause_escape() -> bool:
+                """Try configured pause trigger, then direct Win32 ESC fallback."""
+                if pause_key_trigger.on_blink():
+                    return True
+
+                if not pause_fallback_win32_direct:
+                    return False
+
+                try:
+                    user32 = ctypes.windll.user32
+                    vk_escape = 0x1B
+                    key_up_flag = 0x0002
+                    hold_seconds = max(int(pause_key_cfg.get("hold_ms", 45)), 1) / 1000.0
+                    user32.keybd_event(vk_escape, 0, 0, 0)
+                    time.sleep(hold_seconds)
+                    user32.keybd_event(vk_escape, 0, key_up_flag, 0)
+                    print("[Pause] ESC envoye via fallback win32 direct")
+                    return True
+                except Exception as exc:
+                    print(f"[Pause] Echec envoi ESC fallback: {exc}")
+                    return False
+
+            def _build_hand_trigger(action_key: str) -> BlinkKeyboardTrigger:
+                cfg = dict(keyboard_cfg)
+                cfg["enabled"] = hand_trigger_enabled
+                cfg["key"] = action_key
+
+                for field in (
+                    "window_title",
+                    "hold_ms",
+                    "cooldown_ms",
+                    "focus_window",
+                    "focus_delay_ms",
+                    "send_method",
+                    "allow_method_fallback",
+                    "debug_logs",
+                ):
+                    if field in hand_trigger_cfg:
+                        cfg[field] = hand_trigger_cfg[field]
+                return BlinkKeyboardTrigger(cfg)
+
+            left_hand_trigger = _build_hand_trigger(str(hand_trigger_cfg.get("left_hand_key", "left")))
+            right_hand_trigger = _build_hand_trigger(str(hand_trigger_cfg.get("right_hand_key", "right")))
+            left_thumb_trigger = _build_hand_trigger(str(hand_trigger_cfg.get("left_thumb_key", "down")))
+            right_thumb_trigger = _build_hand_trigger(str(hand_trigger_cfg.get("right_thumb_key", "up")))
 
             gaze_cfg = config.get("gaze_pause", {})
             gaze_enabled = bool(gaze_cfg.get("enabled", True))
@@ -1173,6 +1501,12 @@ class AddonController:
             gaze_debug = bool(gaze_cfg.get("debug_logs", False))
 
             was_blinking = False
+            blink_press_armed = True
+            last_blink_trigger_ms = 0.0
+            was_left_hand_closed = False
+            was_right_hand_closed = False
+            was_left_thumb_closed = False
+            was_right_thumb_closed = False
             paused = False
             was_in_gaze_pause_pos = False
             was_in_gaze_resume_pos = False
@@ -1197,8 +1531,38 @@ class AddonController:
                 right_hand_closed = bool(data_dict.get("right_hand_closed", 0.0) >= 0.5)
                 right_thumb_closed = bool(data_dict.get("right_thumb_closed", 0.0) >= 0.5)
 
+                pause_gesture_pending = False
+                if gaze_enabled and not paused:
+                    pause_gesture_pending = _check_gaze(
+                        gaze_dir_pause,
+                        gaze_yaw,
+                        gaze_pitch,
+                        gaze_yaw_thr,
+                        gaze_pitch_thr,
+                    )
+
                 self.state.set_left_hand_state(left_hand_detected, left_hand_closed, left_thumb_closed)
                 self.state.set_right_hand_state(right_hand_detected, right_hand_closed, right_thumb_closed)
+
+                can_trigger_hand_inputs = (hand_trigger_allow_when_paused or (not paused)) and (not pause_gesture_pending)
+                if can_trigger_hand_inputs:
+                    if left_hand_closed and not was_left_hand_closed:
+                        if left_hand_trigger.on_blink():
+                            self.state.register_game_input("L")
+                    if right_hand_closed and not was_right_hand_closed:
+                        if right_hand_trigger.on_blink():
+                            self.state.register_game_input("R")
+                    if left_thumb_closed and not was_left_thumb_closed:
+                        if left_thumb_trigger.on_blink():
+                            self.state.register_game_input("D")
+                    if right_thumb_closed and not was_right_thumb_closed:
+                        if right_thumb_trigger.on_blink():
+                            self.state.register_game_input("U")
+
+                was_left_hand_closed = left_hand_closed
+                was_right_hand_closed = right_hand_closed
+                was_left_thumb_closed = left_thumb_closed
+                was_right_thumb_closed = right_thumb_closed
 
                 if blink_value >= blink_threshold:
                     is_blinking = True
@@ -1211,18 +1575,31 @@ class AddonController:
 
                 blink_rising_edge = is_blinking and not was_blinking
                 blink_falling_edge = (not is_blinking) and was_blinking
+                now_ms = time.time() * 1000.0
 
                 should_trigger_blink = False
                 if blink_trigger_edge in ("press", "rising", "close", "closed"):
-                    should_trigger_blink = blink_rising_edge
+                    if blink_value <= blink_rearm_threshold:
+                        blink_press_armed = True
+                    if blink_value >= blink_threshold and blink_press_armed:
+                        should_trigger_blink = True
+                        blink_press_armed = False
                 elif blink_trigger_edge in ("release", "falling", "open"):
                     should_trigger_blink = blink_falling_edge
                 else:
                     # Fallback sécurisé: comportement instantané.
-                    should_trigger_blink = blink_rising_edge
+                    if blink_value <= blink_rearm_threshold:
+                        blink_press_armed = True
+                    if blink_value >= blink_threshold and blink_press_armed:
+                        should_trigger_blink = True
+                        blink_press_armed = False
+
+                if now_ms - last_blink_trigger_ms < blink_min_trigger_interval_ms:
+                    should_trigger_blink = False
 
                 if should_trigger_blink and not paused:
                     if keyboard_trigger.on_blink():
+                        last_blink_trigger_ms = now_ms
                         self.state.set_blinking(True)
                 was_blinking = is_blinking
 
@@ -1248,6 +1625,7 @@ class AddonController:
                             paused = True
                             self.state.set_paused(True)
                             self.state.set_status_message("En pause - regard vers la reprise")
+                            _send_pause_escape()
                             gaze_last_trigger = now
 
                     if in_resume_pos and not was_in_gaze_resume_pos:
