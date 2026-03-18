@@ -3,9 +3,92 @@ import time
 import ctypes
 import sys
 import threading
+import random
+import wave
 import tkinter as tk
 from tkinter import font as tkfont
 from PIL import Image, ImageTk
+
+try:
+    import winsound
+except Exception:
+    winsound = None
+
+try:
+    import pygame
+except Exception:
+    pygame = None
+
+
+class _WindowsSoundPlayer:
+    """Best-effort async sound player for wav/ogg on Windows."""
+
+    def __init__(self):
+        self._winmm = None
+        self._alias = "rd_blink_pause_sfx"
+        self._pygame_ready = False
+        self._pygame_lock = threading.Lock()
+        try:
+            self._winmm = ctypes.windll.winmm
+        except Exception:
+            self._winmm = None
+
+    def _play_with_pygame(self, sound_path: str) -> bool:
+        if pygame is None:
+            return False
+
+        with self._pygame_lock:
+            try:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                pygame.mixer.music.load(sound_path)
+                pygame.mixer.music.play()
+                self._pygame_ready = True
+                return True
+            except Exception as exc:
+                print(f"[Sound] pygame playback failed: {exc}")
+                return False
+
+    def play(self, sound_path: str):
+        if not sound_path or (not os.path.exists(sound_path)):
+            return
+
+        ext = os.path.splitext(sound_path)[1].lower()
+        if ext in (".ogg", ".mp3"):
+            if self._play_with_pygame(sound_path):
+                return
+
+        if ext == ".wav" and winsound is not None:
+            try:
+                winsound.PlaySound(
+                    sound_path,
+                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                )
+                return
+            except Exception:
+                pass
+
+        if self._winmm is None:
+            print(f"[Sound] No playback backend available for: {sound_path}")
+            return
+
+        try:
+            self._winmm.mciSendStringW(f'close {self._alias}', None, 0, 0)
+            open_code = self._winmm.mciSendStringW(
+                f'open "{sound_path}" type mpegvideo alias {self._alias}',
+                None,
+                0,
+                0,
+            )
+            if open_code != 0:
+                print(f"[Sound] MCI open failed ({open_code}) for: {sound_path}")
+                return
+
+            play_code = self._winmm.mciSendStringW(f'play {self._alias}', None, 0, 0)
+            if play_code != 0:
+                print(f"[Sound] MCI play failed ({play_code}) for: {sound_path}")
+        except Exception as exc:
+            print(f"[Sound] Unexpected playback error: {exc}")
 
 
 def _get_project_root_path() -> str:
@@ -39,6 +122,8 @@ class AddonState:
             "D": 0.0,
         }
         self.input_history = []
+        self._jumpscare_lock = threading.Lock()
+        self._pending_jumpscares = []
         self.observers = []
 
     def add_observer(self, callback):
@@ -67,6 +152,8 @@ class AddonState:
                 self.is_right_thumb_closed = False
                 self.last_input_times = {"L": 0.0, "R": 0.0, "U": 0.0, "D": 0.0}
                 self.input_history = []
+                with self._jumpscare_lock:
+                    self._pending_jumpscares.clear()
             self.notify_observers()
 
     def set_paused(self, paused: bool):
@@ -134,6 +221,17 @@ class AddonState:
         self.input_history = self.input_history[-8:]
         self.notify_observers()
 
+    def enqueue_jumpscare(self, payload: dict):
+        with self._jumpscare_lock:
+            self._pending_jumpscares.append(dict(payload))
+        self.notify_observers()
+
+    def pop_pending_jumpscares(self) -> list[dict]:
+        with self._jumpscare_lock:
+            items = self._pending_jumpscares[:]
+            self._pending_jumpscares.clear()
+        return items
+
     def _reset_blink(self):
         self.set_blinking(False)
 
@@ -166,6 +264,8 @@ class AddonGUI:
         self._background_label = None
         self._background_image = None
         self._widget_bg = "#2C3E50"
+        self._jumpscare_windows = []
+        self._jumpscare_images = []
 
         self.root.title("Rhythm Doctor Accessibility Addon")
         self.root.geometry("760x520")
@@ -1038,8 +1138,234 @@ class AddonGUI:
                 self.input_debug_history.config(text=history_tail)
             else:
                 self.input_debug_history.config(text="No input sent yet")
+
+            for payload in self.state.pop_pending_jumpscares():
+                self._show_jumpscare_spam(payload)
         except Exception as e:
             print(f"[GUI] Erreur mise à jour: {e}")
+
+    def _show_jumpscare_spam(self, payload: dict):
+        """Spawn scary popups from main Tk thread only (Tk is not thread-safe)."""
+        image_path = str(payload.get("image_path", ""))
+        if not image_path or (not os.path.exists(image_path)):
+            return
+
+        try:
+            base_image = Image.open(image_path).convert("RGBA")
+        except Exception as exc:
+            print(f"[EasterEgg] Erreur chargement image: {exc}")
+            return
+
+        popup_count = max(1, int(payload.get("popup_count", 18)))
+        popup_lifetime_ms = max(80, int(payload.get("popup_lifetime_ms", 700)))
+        spawn_interval_ms = max(10, int(payload.get("spawn_interval_ms", 45)))
+        min_scale = float(payload.get("min_scale", 0.22))
+        max_scale = float(payload.get("max_scale", 0.58))
+        topmost_alpha = float(payload.get("topmost_alpha", 0.98))
+        prelude_delay_ms = max(0, int(payload.get("prelude_delay_ms", 500)))
+        prelude_scale = float(payload.get("prelude_scale", 0.92))
+        prelude_lifetime_ms = max(120, int(payload.get("prelude_lifetime_ms", 900)))
+        sound_base_path = str(payload.get("sound_base_path", ""))
+        sound_plus_path = str(payload.get("sound_plus_path", ""))
+        mask_color = "#00FF00"
+
+        def _wav_duration_ms(sound_path: str) -> int:
+            if not sound_path or (not os.path.exists(sound_path)):
+                return 0
+            try:
+                with wave.open(sound_path, "rb") as wav_file:
+                    frames = wav_file.getnframes()
+                    framerate = wav_file.getframerate()
+                    if framerate <= 0:
+                        return 0
+                    return int((frames / float(framerate)) * 1000.0)
+            except Exception:
+                return 0
+
+        screen_w = max(100, int(self.root.winfo_screenwidth()))
+        screen_h = max(100, int(self.root.winfo_screenheight()))
+        base_w, base_h = base_image.size
+        if base_w <= 1 or base_h <= 1:
+            return
+
+        def _cleanup_popup(popup, tk_img):
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            try:
+                self._jumpscare_windows.remove(popup)
+            except Exception:
+                pass
+            try:
+                self._jumpscare_images.remove(tk_img)
+            except Exception:
+                pass
+
+        def _spawn_one_popup():
+            try:
+                scale = random.uniform(min_scale, max_scale)
+                target_w = max(64, int(base_w * scale))
+                target_h = max(64, int(base_h * scale))
+                target_w = min(target_w, screen_w)
+                target_h = min(target_h, screen_h)
+
+                x_max = max(0, screen_w - target_w)
+                y_max = max(0, screen_h - target_h)
+                pos_x = random.randint(0, x_max) if x_max > 0 else 0
+                pos_y = random.randint(0, y_max) if y_max > 0 else 0
+
+                popup = tk.Toplevel(self.root)
+                popup.overrideredirect(True)
+                popup.attributes("-topmost", True)
+                try:
+                    popup.attributes("-alpha", topmost_alpha)
+                except Exception:
+                    pass
+
+                popup.configure(bg=mask_color)
+                try:
+                    popup.attributes("-transparentcolor", mask_color)
+                except Exception:
+                    pass
+
+                img = base_image.resize((target_w, target_h), Image.Resampling.NEAREST)
+                tk_img = ImageTk.PhotoImage(img)
+                self._jumpscare_images.append(tk_img)
+
+                label = tk.Label(popup, image=tk_img, bg=mask_color, bd=0, highlightthickness=0)
+                label.image = tk_img
+                label.pack()
+
+                popup.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+                self._jumpscare_windows.append(popup)
+
+                try:
+                    HWND_TOPMOST = -1
+                    SWP_NOMOVE = 0x0002
+                    SWP_NOSIZE = 0x0001
+                    SWP_SHOWWINDOW = 0x0040
+                    ctypes.windll.user32.SetWindowPos(
+                        popup.winfo_id(),
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    )
+                except Exception:
+                    pass
+
+                popup.after(popup_lifetime_ms, lambda p=popup, im=tk_img: _cleanup_popup(p, im))
+            except Exception as exc:
+                print(f"[EasterEgg] Erreur popup: {exc}")
+
+        def _play_sound(sound_path: str):
+            if not sound_path or (not os.path.exists(sound_path)) or winsound is None:
+                return
+            try:
+                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            except Exception:
+                pass
+
+        def _show_center_prelude():
+            try:
+                target_w = max(120, int(screen_w * max(0.2, min(prelude_scale, 1.0))))
+                ratio = base_h / float(base_w)
+                target_h = max(120, int(target_w * ratio))
+                if target_h > screen_h:
+                    target_h = int(screen_h * 0.92)
+                    target_w = max(120, int(target_h / max(ratio, 1e-6)))
+
+                pos_x = max(0, (screen_w - target_w) // 2)
+                pos_y = max(0, (screen_h - target_h) // 2)
+
+                popup = tk.Toplevel(self.root)
+                popup.overrideredirect(True)
+                popup.attributes("-topmost", True)
+                try:
+                    popup.attributes("-alpha", topmost_alpha)
+                except Exception:
+                    pass
+
+                popup.configure(bg=mask_color)
+                try:
+                    popup.attributes("-transparentcolor", mask_color)
+                except Exception:
+                    pass
+
+                img = base_image.resize((target_w, target_h), Image.Resampling.NEAREST)
+                tk_img = ImageTk.PhotoImage(img)
+                self._jumpscare_images.append(tk_img)
+
+                label = tk.Label(popup, image=tk_img, bg=mask_color, bd=0, highlightthickness=0)
+                label.image = tk_img
+                label.pack()
+
+                popup.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+                self._jumpscare_windows.append(popup)
+
+                try:
+                    HWND_TOPMOST = -1
+                    SWP_NOMOVE = 0x0002
+                    SWP_NOSIZE = 0x0001
+                    SWP_SHOWWINDOW = 0x0040
+                    ctypes.windll.user32.SetWindowPos(
+                        popup.winfo_id(),
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    )
+                except Exception:
+                    pass
+                return popup, tk_img
+            except Exception as exc:
+                print(f"[EasterEgg] Erreur prelude: {exc}")
+                return None, None
+
+        prelude_popup, prelude_img = _show_center_prelude()
+
+        def _launch_phase2():
+            _play_sound(sound_plus_path)
+            for i in range(popup_count):
+                self.root.after(i * spawn_interval_ms, _spawn_one_popup)
+
+            # Keep the big centered popup visible until small popups have started appearing.
+            if prelude_popup is not None and prelude_img is not None:
+                hold_after_start_ms = max(120, min(prelude_lifetime_ms, 700))
+                self.root.after(
+                    hold_after_start_ms,
+                    lambda p=prelude_popup, im=prelude_img: _cleanup_popup(p, im),
+                )
+
+        # Phase 1: giant centered image.
+        if prelude_popup is not None and prelude_img is not None:
+            # Safety cap: if phase 2 fails unexpectedly, avoid a stuck permanent popup.
+            base_sound_duration_ms = _wav_duration_ms(sound_base_path)
+            safety_close_ms = max(prelude_lifetime_ms, base_sound_duration_ms + prelude_delay_ms + 2000)
+            prelude_popup.after(
+                safety_close_ms,
+                lambda p=prelude_popup, im=prelude_img: _cleanup_popup(p, im),
+            )
+
+        # Phase 2: wait until base sound is finished, then plus sound + popup spam.
+        if winsound is not None and sound_base_path and os.path.exists(sound_base_path):
+            def _wait_base_and_start_phase2():
+                try:
+                    winsound.PlaySound(sound_base_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+                except Exception:
+                    # Fallback keeps behavior deterministic even if sound playback fails.
+                    time.sleep(max(0, prelude_delay_ms) / 1000.0)
+                self.root.after(0, _launch_phase2)
+
+            threading.Thread(target=_wait_base_and_start_phase2, daemon=True).start()
+        else:
+            _play_sound(sound_base_path)
+            self.root.after(prelude_delay_ms, _launch_phase2)
 
 
 class PauseNotifier:
@@ -1287,7 +1613,9 @@ class BlinkKeyboardTrigger:
     def _focus_game_window(self):
         windows = self.gw.getWindowsWithTitle(self.window_title)
         if not windows:
-            raise RuntimeError(f"Fenetre introuvable: '{self.window_title}'")
+            if self.debug_logs:
+                print(f"[Keyboard] Fenetre introuvable: '{self.window_title}'")
+            return False
 
         target = self.window_title.strip().lower()
         candidates = []
@@ -1310,9 +1638,12 @@ class BlinkKeyboardTrigger:
             candidates.sort(key=lambda x: x[0], reverse=True)
             _, game_window, game_title = candidates[0]
         else:
-            # Dernier recours: prend le premier resultat si tous les autres sont exclus.
-            game_window = windows[0]
-            game_title = str(getattr(game_window, "title", "") or "")
+            if self.debug_logs:
+                print(
+                    "[Keyboard] Aucune fenetre valide apres exclusions. "
+                    f"Titres trouves: {[str(getattr(w, 'title', '') or '') for w in windows]}"
+                )
+            return False
 
         game_window.activate()
 
@@ -1326,6 +1657,7 @@ class BlinkKeyboardTrigger:
             print(f"[Keyboard] Focus cible='{game_title}'")
 
         time.sleep(max(self.focus_delay_ms, 0) / 1000.0)
+        return True
 
     def on_blink(self) -> bool:
         if not self.enabled or not self._ready:
@@ -1339,7 +1671,9 @@ class BlinkKeyboardTrigger:
 
         try:
             if self.focus_window:
-                self._focus_game_window()
+                if not self._focus_game_window():
+                    if self.debug_logs:
+                        print("[Keyboard] Focus auto indisponible, tentative envoi touche sans focus")
 
             sent_method = None
             last_error = None
@@ -1368,6 +1702,118 @@ class BlinkKeyboardTrigger:
             return False
 
 
+class BlinkJumpscareEvent:
+    """Affiche un spam de popups plein ecran base sur seeYOU.png."""
+
+    def __init__(self, config: dict, project_root: str):
+        self.enabled = bool(config.get("enabled", False))
+        self.base_trigger_probability = self._parse_probability(
+            config.get("trigger_probability", config.get("chance_percent", 0.01)),
+            default=0.01,
+        )
+        self.initial_trigger_probability = self._parse_probability(
+            config.get("initial_trigger_probability", config.get("initial_chance_percent", 50.0)),
+            default=0.50,
+        )
+        self.initial_blink_count = max(0, int(config.get("initial_blink_count", 6)))
+
+        self.cooldown_seconds = float(config.get("cooldown_seconds", 20.0))
+        self.popup_count = max(1, int(config.get("popup_count", 18)))
+        self.popup_lifetime_ms = max(80, int(config.get("popup_lifetime_ms", 700)))
+        self.spawn_interval_ms = max(10, int(config.get("spawn_interval_ms", 45)))
+        self.min_scale = float(config.get("min_scale", 0.22))
+        self.max_scale = float(config.get("max_scale", 0.58))
+        self.topmost_alpha = float(config.get("topmost_alpha", 0.98))
+        self.prelude_delay_ms = int(config.get("prelude_delay_ms", 500))
+        self.prelude_scale = float(config.get("prelude_scale", 0.92))
+        self.prelude_lifetime_ms = int(config.get("prelude_lifetime_ms", 900))
+        self.debug_logs = bool(config.get("debug_logs", False))
+
+        image_rel_path = str(config.get("image_path", "icons/seeYOU.png"))
+        sound_base_rel_path = str(config.get("sound_base_path", "sounds/seeYou_Base.wav"))
+        sound_plus_rel_path = str(config.get("sound_plus_path", "sounds/seeYou_Plus.wav"))
+        image_path = image_rel_path if os.path.isabs(image_rel_path) else os.path.join(project_root, image_rel_path)
+        sound_base_path = (
+            sound_base_rel_path
+            if os.path.isabs(sound_base_rel_path)
+            else os.path.join(project_root, sound_base_rel_path)
+        )
+        sound_plus_path = (
+            sound_plus_rel_path
+            if os.path.isabs(sound_plus_rel_path)
+            else os.path.join(project_root, sound_plus_rel_path)
+        )
+        self.image_path = image_path
+        self.sound_base_path = sound_base_path
+        self.sound_plus_path = sound_plus_path
+
+        self._last_trigger_time = 0.0
+        self._blink_seen_count = 0
+
+        if self.enabled and not os.path.exists(self.image_path):
+            print(f"[EasterEgg] Image introuvable: {self.image_path} (desactive)")
+            self.enabled = False
+
+        if self.enabled and (not os.path.exists(self.sound_base_path)):
+            print(f"[EasterEgg] Son base introuvable: {self.sound_base_path}")
+
+        if self.enabled and (not os.path.exists(self.sound_plus_path)):
+            print(f"[EasterEgg] Son plus introuvable: {self.sound_plus_path}")
+
+    def _parse_probability(self, value, default: float) -> float:
+        # Accept either [0..1] or percentage [0..100].
+        try:
+            probability_value = float(value)
+        except Exception:
+            probability_value = float(default)
+
+        if probability_value > 1.0:
+            probability_value = probability_value / 100.0
+
+        return max(0.0, min(1.0, probability_value))
+
+    def _current_probability(self) -> float:
+        if self._blink_seen_count < self.initial_blink_count:
+            return self.initial_trigger_probability
+        return self.base_trigger_probability
+
+    def on_blink(self) -> dict | None:
+        if not self.enabled:
+            return None
+
+        self._blink_seen_count += 1
+
+        now = time.time()
+        if now - self._last_trigger_time < self.cooldown_seconds:
+            return None
+
+        current_probability = self._current_probability()
+        if random.random() > current_probability:
+            return None
+
+        self._last_trigger_time = now
+
+        if self.debug_logs:
+            print(
+                "[EasterEgg] Trigger jumpscare "
+                f"(p={current_probability:.6f}, count={self.popup_count}, blink={self._blink_seen_count})"
+            )
+        return {
+            "image_path": self.image_path,
+            "popup_count": self.popup_count,
+            "popup_lifetime_ms": self.popup_lifetime_ms,
+            "spawn_interval_ms": self.spawn_interval_ms,
+            "min_scale": self.min_scale,
+            "max_scale": self.max_scale,
+            "topmost_alpha": self.topmost_alpha,
+            "prelude_delay_ms": self.prelude_delay_ms,
+            "prelude_scale": self.prelude_scale,
+            "prelude_lifetime_ms": self.prelude_lifetime_ms,
+            "sound_base_path": self.sound_base_path,
+            "sound_plus_path": self.sound_plus_path,
+        }
+
+
 def _check_gaze(direction: str, yaw: float, pitch: float, yaw_thr: float, pitch_thr: float) -> bool:
     """Vérifie si le regard est dans une direction donnée.
     direction: bottom_left, bottom_right, top_left, top_right, left, right, up, down
@@ -1390,6 +1836,7 @@ class AddonController:
         self._stop_event = threading.Event()
         self._worker_thread = None
         self._thread_lock = threading.Lock()
+        self._sound_player = _WindowsSoundPlayer()
 
     def set_enabled(self, enabled: bool):
         if enabled:
@@ -1441,6 +1888,14 @@ class AddonController:
             else:
                 project_root = os.path.dirname(os.path.abspath(__file__))
 
+            pause_sound_activate = os.path.join(project_root, "sounds", "sndOttoActivate.wav")
+            if not os.path.exists(pause_sound_activate):
+                pause_sound_activate = os.path.join(project_root, "sounds", "sndOttoActivate.ogg")
+
+            pause_sound_deactivate = os.path.join(project_root, "sounds", "sndOttoDeactivate.wav")
+            if not os.path.exists(pause_sound_deactivate):
+                pause_sound_deactivate = os.path.join(project_root, "sounds", "sndOttoDeactivate.ogg")
+
             config_path = os.path.join(project_root, "config", "Network.yaml")
             if not os.path.exists(config_path):
                 self.state.set_status_message("Erreur: Network.yaml introuvable")
@@ -1471,6 +1926,9 @@ class AddonController:
             blink_min_trigger_interval_ms = int(blink_cfg.get("min_trigger_interval_ms", 70))
             keyboard_cfg = config.get("keyboard_trigger", {})
             keyboard_trigger = BlinkKeyboardTrigger(keyboard_cfg)
+
+            easter_egg_cfg = config.get("easter_egg", {})
+            jumpscare_event = BlinkJumpscareEvent(easter_egg_cfg, project_root)
 
             hand_trigger_cfg = config.get("hand_trigger", {})
             hand_trigger_enabled = bool(hand_trigger_cfg.get("enabled", True))
@@ -1654,6 +2112,9 @@ class AddonController:
                     should_trigger_blink = False
 
                 if should_trigger_blink and not paused:
+                    jumpscare_payload = jumpscare_event.on_blink()
+                    if jumpscare_payload is not None:
+                        self.state.enqueue_jumpscare(jumpscare_payload)
                     if keyboard_trigger.on_blink():
                         last_blink_trigger_ms = now_ms
                         self.state.set_blinking(True)
@@ -1681,6 +2142,7 @@ class AddonController:
                             paused = True
                             self.state.set_paused(True)
                             self.state.set_status_message("En pause - regard vers la reprise")
+                            self._sound_player.play(pause_sound_activate)
                             _send_pause_escape()
                             gaze_last_trigger = now
 
@@ -1689,6 +2151,7 @@ class AddonController:
                             paused = False
                             self.state.set_paused(False)
                             self.state.set_status_message("Actif - clignez pour declencher")
+                            self._sound_player.play(pause_sound_deactivate)
                             gaze_last_trigger = now
 
                     was_in_gaze_pause_pos = in_pause_pos

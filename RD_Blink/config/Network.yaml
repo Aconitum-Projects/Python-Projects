@@ -76,6 +76,26 @@ keyboard_trigger:
   allow_method_fallback: true
   debug_logs: true
 
+easter_egg:
+  enabled: true
+  image_path: "icons/seeYOU.png"
+  sound_base_path: "sounds/seeYou_Base.wav"
+  sound_plus_path: "sounds/seeYou_Plus.wav"
+  initial_chance_percent: 0.01   # ultra rare
+  initial_blink_count: 6         # nombre de blinks avec la chance initiale
+  chance_percent: 0.01           # ultra rare
+  cooldown_seconds: 20.0
+  prelude_delay_ms: 500
+  prelude_scale: 0.92
+  prelude_lifetime_ms: 900
+  popup_count: 90
+  spawn_interval_ms: 20
+  popup_lifetime_ms: 2400
+  min_scale: 0.35
+  max_scale: 0.95
+  topmost_alpha: 0.98
+  debug_logs: false
+
 hand_trigger:
   enabled: true
   allow_when_paused: false
