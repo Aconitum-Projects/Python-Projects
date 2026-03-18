@@ -1,6 +1,13 @@
 mediapipe_info:
   camera_index: 0
   camera_fallback_indexes: [1, 2, 3]
+  camera_auto_scan_enabled: true
+  camera_auto_scan_max_index: 8
+  camera_open_retries: 3
+  camera_retry_delay_seconds: 0.6
+  camera_warmup_frames: 3
+  camera_prefer_mjpg: true
+  camera_backends: ["dshow", "msmf", "any", "auto"]
   frame_width: 1280
   frame_height: 720
   blink_mode: "max"  # max ou avg

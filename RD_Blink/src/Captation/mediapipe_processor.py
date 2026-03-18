@@ -1,4 +1,5 @@
 import math
+import time
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -18,6 +19,13 @@ class MediaPipeFaceProcessor:
 
         camera_index = int(mp_cfg.get("camera_index", 0))
         camera_fallback_indexes = mp_cfg.get("camera_fallback_indexes", [1, 2, 3])
+        camera_auto_scan_enabled = bool(mp_cfg.get("camera_auto_scan_enabled", True))
+        camera_auto_scan_max_index = int(mp_cfg.get("camera_auto_scan_max_index", 8))
+        camera_open_retries = int(mp_cfg.get("camera_open_retries", 3))
+        camera_retry_delay_seconds = float(mp_cfg.get("camera_retry_delay_seconds", 0.6))
+        camera_warmup_frames = int(mp_cfg.get("camera_warmup_frames", 3))
+        camera_prefer_mjpg = bool(mp_cfg.get("camera_prefer_mjpg", True))
+        backend_names_cfg = mp_cfg.get("camera_backends", ["dshow", "msmf", "any", "auto"])
         frame_width = mp_cfg.get("frame_width")
         frame_height = mp_cfg.get("frame_height")
         blink_mode = str(mp_cfg.get("blink_mode", "max")).lower()
@@ -43,31 +51,106 @@ class MediaPipeFaceProcessor:
                 )
 
         self.capture = None
-        candidate_indexes = [camera_index] + [int(i) for i in camera_fallback_indexes if int(i) != camera_index]
-        backend_candidates = [cv2.CAP_DSHOW, cv2.CAP_MSMF, None]
 
-        for index in candidate_indexes:
-            for backend in backend_candidates:
-                cap = cv2.VideoCapture(index) if backend is None else cv2.VideoCapture(index, backend)
-                if cap.isOpened():
-                    self.capture = cap
-                    backend_name = "AUTO" if backend is None else str(backend)
-                    print(f"[MediaPipe] Caméra utilisée: index={index}, backend={backend_name}")
-                    break
+        # Build a robust candidate list: configured index first, then explicit fallbacks,
+        # then auto-scan common camera indexes when enabled.
+        candidate_indexes = []
+        for idx in [camera_index] + [int(i) for i in camera_fallback_indexes]:
+            if idx not in candidate_indexes:
+                candidate_indexes.append(idx)
+
+        if camera_auto_scan_enabled:
+            for idx in range(max(0, camera_auto_scan_max_index) + 1):
+                if idx not in candidate_indexes:
+                    candidate_indexes.append(idx)
+
+        backend_map = {
+            "dshow": cv2.CAP_DSHOW,
+            "msmf": cv2.CAP_MSMF,
+            "any": cv2.CAP_ANY,
+            "auto": None,
+        }
+        backend_candidates = []
+        backend_name_pairs = []
+        for name in backend_names_cfg:
+            key = str(name).strip().lower()
+            if key not in backend_map:
+                continue
+            backend_value = backend_map[key]
+            if backend_value not in backend_candidates:
+                backend_candidates.append(backend_value)
+                backend_name_pairs.append((key.upper(), backend_value))
+
+        if not backend_name_pairs:
+            backend_name_pairs = [("DSHOW", cv2.CAP_DSHOW), ("MSMF", cv2.CAP_MSMF), ("ANY", cv2.CAP_ANY), ("AUTO", None)]
+
+        def _try_open_camera(index: int, backend_value):
+            cap = cv2.VideoCapture(index) if backend_value is None else cv2.VideoCapture(index, backend_value)
+            if not cap.isOpened():
                 cap.release()
+                return None
+
+            if frame_width:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(frame_width))
+            if frame_height:
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(frame_height))
+
+            if camera_prefer_mjpg:
+                try:
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                except Exception:
+                    pass
+
+            # Warmup reads improve compatibility on some drivers that need initial frames.
+            warmup_reads = max(1, camera_warmup_frames)
+            frame_ok = False
+            for _ in range(warmup_reads):
+                ok, _ = cap.read()
+                if ok:
+                    frame_ok = True
+                    break
+                time.sleep(0.03)
+
+            if not frame_ok:
+                cap.release()
+                return None
+
+            return cap
+
+        for attempt in range(max(1, camera_open_retries)):
+            for index in candidate_indexes:
+                for backend_name, backend_value in backend_name_pairs:
+                    cap = _try_open_camera(index, backend_value)
+                    if cap is None:
+                        continue
+
+                    self.capture = cap
+                    print(
+                        "[MediaPipe] Camera ouverte: "
+                        f"index={index}, backend={backend_name}, attempt={attempt + 1}"
+                    )
+                    break
+
+                if self.capture is not None:
+                    break
 
             if self.capture is not None:
                 break
 
+            if attempt + 1 < max(1, camera_open_retries):
+                print(
+                    "[MediaPipe] Echec ouverture camera, nouvelle tentative dans "
+                    f"{camera_retry_delay_seconds:.1f}s (tentative {attempt + 2}/{max(1, camera_open_retries)})"
+                )
+                time.sleep(max(0.05, camera_retry_delay_seconds))
+
         if self.capture is None:
             raise RuntimeError(
-                f"[MediaPipe] Impossible d'ouvrir une caméra (indexes testés: {candidate_indexes})"
+                "[MediaPipe] Impossible d'ouvrir une camera. "
+                f"Indexes testes: {candidate_indexes}. "
+                "Verifiez permissions Windows camera, fermeture des applis qui utilisent deja la webcam, "
+                "et testez un autre index dans Network.yaml."
             )
-
-        if frame_width:
-            self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(frame_width))
-        if frame_height:
-            self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(frame_height))
 
         base_options = python.BaseOptions(model_asset_path=str(model_path))
         options = vision.FaceLandmarkerOptions(
