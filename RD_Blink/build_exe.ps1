@@ -33,7 +33,7 @@ if (-not (Test-Path $specRoot)) {
 uv run --with pyinstaller pyinstaller `
   --noconfirm `
   --clean `
-  --name RD_Blink `
+  --name Blink_Doctor `
   --onedir `
   --windowed `
   --distpath "$distRoot" `
@@ -44,7 +44,7 @@ uv run --with pyinstaller pyinstaller `
   --collect-all cv2 `
   main.py
 
-$distDir = Join-Path $distRoot "RD_Blink"
+$distDir = Join-Path $distRoot "Blink_Doctor"
 $configSource = Join-Path $PSScriptRoot "config"
 $configTarget = Join-Path $distDir "config"
 $iconsSource = Join-Path $PSScriptRoot "icons"
@@ -74,4 +74,4 @@ if (Test-Path $soundsSource) {
   Write-Warning "Dossier sounds introuvable: $soundsSource"
 }
 
-Write-Host "Build termine. Executable: $distRoot\RD_Blink\RD_Blink.exe"
+Write-Host "Build termine. Executable: $distRoot\Blink_Doctor\Blink_Doctor.exe"

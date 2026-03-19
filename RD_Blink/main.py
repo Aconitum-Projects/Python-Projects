@@ -25,7 +25,7 @@ class _WindowsSoundPlayer:
 
     def __init__(self):
         self._winmm = None
-        self._alias = "rd_blink_pause_sfx"
+        self._alias = "blink_doctor_pause_sfx"
         self._pygame_ready = False
         self._pygame_lock = threading.Lock()
         try:
@@ -262,7 +262,7 @@ class AddonState:
 
 
 class AddonGUI:
-    """Interface graphique pour le Rhythm Doctor Accessibility Addon."""
+    """Interface graphique pour Blink Doctor."""
 
     def __init__(self, root, state: AddonState, on_toggle_callback=None):
         self.root = root
@@ -292,7 +292,7 @@ class AddonGUI:
         self._jumpscare_windows = []
         self._jumpscare_images = []
 
-        self.root.title("Rhythm Doctor Accessibility Addon")
+        self.root.title("Blink Doctor")
         self.root.geometry("760x520")
         self.root.resizable(False, False)
         self.root.configure(bg="#2C3E50")
@@ -730,7 +730,7 @@ class AddonGUI:
         title_font = tkfont.Font(family="Arial", size=17, weight="bold")
         title_label = tk.Label(
             self.root,
-            text="Rhythm Doctor Accessibility Addon",
+            text="Blink Doctor",
             font=title_font,
             bg="#2C3E50",
             fg="#ECF0F1"
