@@ -103,6 +103,9 @@ class AddonState:
 
     def __init__(self):
         self.is_running = False
+        self.is_loading = False
+        self.is_camera_linked = False
+        self.is_face_detected = False
         self.is_paused = False
         self.is_blinking = False
         self.is_left_hand_detected = False
@@ -142,6 +145,9 @@ class AddonState:
         if self.is_running != running:
             self.is_running = running
             if not running:
+                self.is_loading = False
+                self.is_camera_linked = False
+                self.is_face_detected = False
                 self.is_paused = False
                 self.is_blinking = False
                 self.is_left_hand_detected = False
@@ -154,6 +160,25 @@ class AddonState:
                 self.input_history = []
                 with self._jumpscare_lock:
                     self._pending_jumpscares.clear()
+            self.notify_observers()
+
+    def set_loading(self, loading: bool):
+        if self.is_loading != bool(loading):
+            self.is_loading = bool(loading)
+            self.notify_observers()
+
+    def set_camera_state(self, linked: bool, face_detected: bool):
+        linked = bool(linked)
+        face_detected = bool(face_detected and linked)
+        if self.is_camera_linked != linked or self.is_face_detected != face_detected:
+            self.is_camera_linked = linked
+            self.is_face_detected = face_detected
+            self.notify_observers()
+
+    def set_face_detected(self, face_detected: bool):
+        face_detected = bool(face_detected and self.is_camera_linked)
+        if self.is_face_detected != face_detected:
+            self.is_face_detected = face_detected
             self.notify_observers()
 
     def set_paused(self, paused: bool):
@@ -277,6 +302,7 @@ class AddonGUI:
         self.icon_size_large = (96, 96)  # Larger size for toggle button
         self.icon_size_toggle = (132, 132)
         self.icon_size_play = (56, 56)
+        self.icon_size_camera = self.icon_size
         self.icons = self._load_icons()
         try:
             if self.icons.get("main") is not None:
@@ -363,7 +389,13 @@ class AddonGUI:
         )
 
     def _can_play_eye_idle_animation(self) -> bool:
-        return bool(self.state.is_running and (not self.state.is_paused) and (not self.state.is_blinking))
+        return bool(
+            self.state.is_running
+            and self.state.is_camera_linked
+            and self.state.is_face_detected
+            and (not self.state.is_paused)
+            and (not self.state.is_blinking)
+        )
 
     def _schedule_eye_idle_animation(self):
         if self._eye_idle_anim_job is not None:
@@ -576,6 +608,9 @@ class AddonGUI:
             "hand_r_closed": "Hand_R_Closed.png",
             "hand_r_thumb_closed": "Hand_R_ThumbClosed.png",
             "hand_r_disabled": "Hand_R_Disabled.png",
+            "camera_off": "CameraOff.png",
+            "camera_on": "CameraOn.png",
+            "camera_face_detected": "CameraFaceDetected.png",
         }
 
         project_root = _get_project_root_path()
@@ -607,6 +642,17 @@ class AddonGUI:
                     img = Image.open(filepath)
                     if img.size != self.icon_size_play:
                         img = img.resize(self.icon_size_play, Image.Resampling.NEAREST)
+                    icons[f"{key}_small"] = ImageTk.PhotoImage(img)
+            except Exception as e:
+                print(f"[GUI] Erreur chargement icone {key}_small: {e}")
+
+        for key, filename in (("camera_off", "CameraOff.png"), ("camera_on", "CameraOn.png"), ("camera_face_detected", "CameraFaceDetected.png")):
+            try:
+                filepath = os.path.join(icons_dir, filename)
+                if os.path.exists(filepath):
+                    img = Image.open(filepath)
+                    if img.size != self.icon_size_camera:
+                        img = img.resize(self.icon_size_camera, Image.Resampling.NEAREST)
                     icons[f"{key}_small"] = ImageTk.PhotoImage(img)
             except Exception as e:
                 print(f"[GUI] Erreur chargement icone {key}_small: {e}")
@@ -690,6 +736,38 @@ class AddonGUI:
             fg="#ECF0F1"
         )
         title_label.pack(pady=(18, 14))
+
+        self.loading_label = tk.Label(
+            self.root,
+            text="",
+            font=("Arial", 10, "bold"),
+            bg="#2C3E50",
+            fg="#F6C177"
+        )
+        self.loading_label.pack(pady=(0, 8))
+
+        self.camera_debug_frame = tk.Frame(self.root, bg="#2C3E50")
+        self.camera_debug_frame.place(relx=1.0, x=-12, y=10, anchor="ne")
+
+        self.camera_debug_icon = tk.Label(
+            self.camera_debug_frame,
+            image=self.icons.get("camera_off_small") or self.icons.get("camera_off"),
+            bg="#2C3E50",
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.camera_debug_icon.image = self.icons.get("camera_off_small") or self.icons.get("camera_off")
+        self.camera_debug_icon.pack(anchor="e")
+
+        self.camera_debug_text = tk.Label(
+            self.camera_debug_frame,
+            text="",
+            font=("Arial", 8, "bold"),
+            bg="#2C3E50",
+            fg="#D8E5F7"
+        )
+        self.camera_debug_text.pack(anchor="e", pady=(2, 0))
 
         self.state_frame = tk.Frame(self.root, bg="#2C3E50")
         self.state_frame.pack(pady=(4, 8))
@@ -973,6 +1051,38 @@ class AddonGUI:
     def _update_ui(self):
         """Met à jour l'interface en fonction de l'état."""
         try:
+            is_loading = bool(self.state.is_running and self.state.is_loading)
+            has_face = bool(self.state.is_running and self.state.is_camera_linked and self.state.is_face_detected)
+            camera_error = "camera introuvable" in str(self.state.status_message).lower()
+
+            if camera_error:
+                cam_icon = self.icons.get("camera_off_small") or self.icons.get("camera_off")
+                cam_text = "No camera found"
+            elif not self.state.is_running:
+                cam_icon = self.icons.get("camera_off_small") or self.icons.get("camera_off")
+                cam_text = ""
+            elif not self.state.is_camera_linked:
+                cam_icon = self.icons.get("camera_off_small") or self.icons.get("camera_off")
+                cam_text = "No camera found"
+            elif not self.state.is_face_detected:
+                cam_icon = self.icons.get("camera_on_small") or self.icons.get("camera_on")
+                cam_text = "No face detected"
+            else:
+                cam_icon = self.icons.get("camera_face_detected_small") or self.icons.get("camera_face_detected")
+                cam_text = ""
+
+            if cam_icon is not None:
+                self.camera_debug_icon.config(image=cam_icon)
+                self.camera_debug_icon.image = cam_icon
+            self.camera_debug_text.config(text=cam_text)
+
+            if is_loading:
+                # Animated loading text while first camera frames are not ready yet.
+                dots = "." * (int(time.time() * 3.0) % 4)
+                self.loading_label.config(text=f"Loading{dots}")
+            else:
+                self.loading_label.config(text="")
+
             # Couleurs pour les états
             normal_color = "#FFFFFF"
             normal_gray = "#FFFFFF"
@@ -1032,7 +1142,10 @@ class AddonGUI:
                     # Blink normal
                     self.blink_title.config(fg=normal_color)
                     self.blink_help.config(fg=normal_gray)
-                    if not self._eye_anim_running:
+                    if not has_face:
+                        self.blink_btn.config(image=self.icons.get("eye_open_disabled"))
+                        self.blink_btn.image = self.icons.get("eye_open_disabled")
+                    elif not self._eye_anim_running:
                         self.blink_btn.config(image=self.icons.get("eye_open"))
                         self.blink_btn.image = self.icons.get("eye_open")
                     self.hand_title.config(fg=normal_color)
@@ -1090,7 +1203,7 @@ class AddonGUI:
             # Bouton Blink state change
             if self.state.is_blinking:
                 # Show eye closed, but fade if paused
-                if self.state.is_running and self.state.is_paused:
+                if self.state.is_running and (self.state.is_paused or (not has_face)):
                     self.blink_btn.config(image=self.icons.get("eye_closed_disabled"))
                     self.blink_btn.image = self.icons.get("eye_closed_disabled")
                 else:
@@ -1101,7 +1214,9 @@ class AddonGUI:
                 pass
 
             # Update pause title text
-            if self.state.is_paused:
+            if is_loading:
+                self.pause_title.config(text="Loading")
+            elif self.state.is_paused:
                 self.pause_title.config(text="Pause")
             else:
                 self.pause_title.config(text="Playing")
@@ -1707,15 +1822,15 @@ class BlinkJumpscareEvent:
 
     def __init__(self, config: dict, project_root: str):
         self.enabled = bool(config.get("enabled", False))
+        default_trigger_probability = 0.00005
+        configured_probability = config.get(
+            "trigger_probability",
+            config.get("chance_percent", default_trigger_probability),
+        )
         self.base_trigger_probability = self._parse_probability(
-            config.get("trigger_probability", config.get("chance_percent", 0.01)),
-            default=0.01,
+            configured_probability,
+            default=default_trigger_probability,
         )
-        self.initial_trigger_probability = self._parse_probability(
-            config.get("initial_trigger_probability", config.get("initial_chance_percent", 50.0)),
-            default=0.50,
-        )
-        self.initial_blink_count = max(0, int(config.get("initial_blink_count", 6)))
 
         self.cooldown_seconds = float(config.get("cooldown_seconds", 20.0))
         self.popup_count = max(1, int(config.get("popup_count", 18)))
@@ -1773,8 +1888,6 @@ class BlinkJumpscareEvent:
         return max(0.0, min(1.0, probability_value))
 
     def _current_probability(self) -> float:
-        if self._blink_seen_count < self.initial_blink_count:
-            return self.initial_trigger_probability
         return self.base_trigger_probability
 
     def on_blink(self) -> dict | None:
@@ -1851,6 +1964,8 @@ class AddonController:
 
             self._stop_event.clear()
             self.state.set_status_message("Demarrage en cours...")
+            self.state.set_loading(True)
+            self.state.set_camera_state(False, False)
             self.state.set_running(True)
             self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
             self._worker_thread.start()
@@ -1864,6 +1979,8 @@ class AddonController:
             worker.join(timeout=2.0)
 
         self.state.set_running(False)
+        self.state.set_loading(False)
+        self.state.set_camera_state(False, False)
         self.state.set_paused(False)
         self.state.set_blinking(False)
         self.state.set_left_hand_state(False, False)
@@ -1908,7 +2025,18 @@ class AddonController:
             config["project_root"] = project_root
 
             self.state.set_status_message("Initialisation camera...")
-            processor = MediaPipeFaceProcessor(config)
+            try:
+                processor = MediaPipeFaceProcessor(config)
+            except Exception as exc:
+                self.state.set_camera_state(False, False)
+                if "Impossible d'ouvrir une camera" in str(exc):
+                    self.state.set_status_message("Erreur: camera introuvable")
+                else:
+                    self.state.set_status_message(f"Erreur: {exc}")
+                self.state.set_running(False)
+                return
+
+            self.state.set_camera_state(False, False)
 
             sender_ip = config["OSC_output"]["ip"]
             sender_port = config["OSC_output"]["port"]
@@ -2027,13 +2155,48 @@ class AddonController:
             gaze_last_trigger = 0.0
             gaze_log_count = 0
 
-            self.state.set_status_message("Actif - blink + regard + mains gauche/droite")
+            has_received_first_frame = False
 
             while not self._stop_event.is_set():
                 data_dict = processor.get_processed_data()
                 if not data_dict:
+                    self.state.set_camera_state(False, False)
+                    self.state.set_face_detected(False)
+                    self.state.set_blinking(False)
+                    self.state.set_left_hand_state(False, False)
+                    self.state.set_right_hand_state(False, False)
                     time.sleep(max(loop_sleep_seconds, 0.001))
                     continue
+
+                camera_available = bool(float(data_dict.get("camera_available", 1.0)) >= 0.5)
+                face_detected = bool(float(data_dict.get("face_detected", 1.0)) >= 0.5)
+
+                if not camera_available:
+                    self.state.set_camera_state(False, False)
+                    self.state.set_face_detected(False)
+                    self.state.set_blinking(False)
+                    self.state.set_left_hand_state(False, False)
+                    self.state.set_right_hand_state(False, False)
+                    self.state.set_status_message("Erreur: camera introuvable")
+                    time.sleep(max(loop_sleep_seconds, 0.001))
+                    continue
+
+                self.state.set_camera_state(True, face_detected)
+
+                if not has_received_first_frame:
+                    has_received_first_frame = True
+                    self.state.set_loading(False)
+                    self.state.set_status_message("Actif - blink + regard + mains gauche/droite")
+
+                if not face_detected:
+                    self.state.set_face_detected(False)
+                    self.state.set_blinking(False)
+                    self.state.set_left_hand_state(False, False)
+                    self.state.set_right_hand_state(False, False)
+                    time.sleep(max(loop_sleep_seconds, 0.001))
+                    continue
+
+                self.state.set_face_detected(True)
 
                 blink_value = float(data_dict.get("blink", 0.0))
                 gaze_yaw = float(data_dict.get("gaze_yaw", 0.0))
@@ -2174,6 +2337,8 @@ class AddonController:
                     pass
 
             self.state.set_running(False)
+            self.state.set_loading(False)
+            self.state.set_camera_state(False, False)
             self.state.set_paused(False)
             self.state.set_blinking(False)
             self.state.set_left_hand_state(False, False)

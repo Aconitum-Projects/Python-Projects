@@ -81,9 +81,11 @@ easter_egg:
   image_path: "icons/seeYOU.png"
   sound_base_path: "sounds/seeYou_Base.wav"
   sound_plus_path: "sounds/seeYou_Plus.wav"
-  initial_chance_percent: 0.01   # ultra rare
+  trigger_probability: 0.00005
+  initial_trigger_probability: 0.00005
+  initial_chance_percent: 0.00005   # legacy key
   initial_blink_count: 6         # nombre de blinks avec la chance initiale
-  chance_percent: 0.01           # ultra rare
+  chance_percent: 0.00005           # legacy key
   cooldown_seconds: 20.0
   prelude_delay_ms: 500
   prelude_scale: 0.92

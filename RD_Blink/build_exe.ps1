@@ -35,6 +35,7 @@ uv run --with pyinstaller pyinstaller `
   --clean `
   --name RD_Blink `
   --onedir `
+  --windowed `
   --distpath "$distRoot" `
   --workpath "$workRoot" `
   --specpath "$specRoot" `
@@ -48,6 +49,8 @@ $configSource = Join-Path $PSScriptRoot "config"
 $configTarget = Join-Path $distDir "config"
 $iconsSource = Join-Path $PSScriptRoot "icons"
 $iconsTarget = Join-Path $distDir "icons"
+$soundsSource = Join-Path $PSScriptRoot "sounds"
+$soundsTarget = Join-Path $distDir "sounds"
 
 if (Test-Path $configTarget) {
   Remove-Item $configTarget -Recurse -Force
@@ -60,5 +63,15 @@ if (Test-Path $iconsTarget) {
 }
 
 Copy-Item $iconsSource $iconsTarget -Recurse -Force
+
+if (Test-Path $soundsTarget) {
+  Remove-Item $soundsTarget -Recurse -Force
+}
+
+if (Test-Path $soundsSource) {
+  Copy-Item $soundsSource $soundsTarget -Recurse -Force
+} else {
+  Write-Warning "Dossier sounds introuvable: $soundsSource"
+}
 
 Write-Host "Build termine. Executable: $distRoot\RD_Blink\RD_Blink.exe"

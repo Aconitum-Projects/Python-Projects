@@ -51,6 +51,17 @@ class MediaPipeFaceProcessor:
                 )
 
         self.capture = None
+        self._frame_width = int(frame_width) if frame_width else None
+        self._frame_height = int(frame_height) if frame_height else None
+        self._camera_open_retries = max(1, int(camera_open_retries))
+        self._camera_retry_delay_seconds = max(0.05, float(camera_retry_delay_seconds))
+        self._camera_warmup_frames = max(1, int(camera_warmup_frames))
+        self._camera_prefer_mjpg = bool(camera_prefer_mjpg)
+        self._camera_runtime_reconnect_interval_seconds = max(
+            0.2,
+            float(mp_cfg.get("camera_runtime_reconnect_interval_seconds", 1.2)),
+        )
+        self._last_reconnect_attempt_ts = 0.0
 
         # Build a robust candidate list: configured index first, then explicit fallbacks,
         # then auto-scan common camera indexes when enabled.
@@ -83,74 +94,9 @@ class MediaPipeFaceProcessor:
 
         if not backend_name_pairs:
             backend_name_pairs = [("DSHOW", cv2.CAP_DSHOW), ("MSMF", cv2.CAP_MSMF), ("ANY", cv2.CAP_ANY), ("AUTO", None)]
-
-        def _try_open_camera(index: int, backend_value):
-            cap = cv2.VideoCapture(index) if backend_value is None else cv2.VideoCapture(index, backend_value)
-            if not cap.isOpened():
-                cap.release()
-                return None
-
-            if frame_width:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(frame_width))
-            if frame_height:
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(frame_height))
-
-            if camera_prefer_mjpg:
-                try:
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                except Exception:
-                    pass
-
-            # Warmup reads improve compatibility on some drivers that need initial frames.
-            warmup_reads = max(1, camera_warmup_frames)
-            frame_ok = False
-            for _ in range(warmup_reads):
-                ok, _ = cap.read()
-                if ok:
-                    frame_ok = True
-                    break
-                time.sleep(0.03)
-
-            if not frame_ok:
-                cap.release()
-                return None
-
-            return cap
-
-        for attempt in range(max(1, camera_open_retries)):
-            for index in candidate_indexes:
-                for backend_name, backend_value in backend_name_pairs:
-                    cap = _try_open_camera(index, backend_value)
-                    if cap is None:
-                        continue
-
-                    self.capture = cap
-                    print(
-                        "[MediaPipe] Camera ouverte: "
-                        f"index={index}, backend={backend_name}, attempt={attempt + 1}"
-                    )
-                    break
-
-                if self.capture is not None:
-                    break
-
-            if self.capture is not None:
-                break
-
-            if attempt + 1 < max(1, camera_open_retries):
-                print(
-                    "[MediaPipe] Echec ouverture camera, nouvelle tentative dans "
-                    f"{camera_retry_delay_seconds:.1f}s (tentative {attempt + 2}/{max(1, camera_open_retries)})"
-                )
-                time.sleep(max(0.05, camera_retry_delay_seconds))
-
-        if self.capture is None:
-            raise RuntimeError(
-                "[MediaPipe] Impossible d'ouvrir une camera. "
-                f"Indexes testes: {candidate_indexes}. "
-                "Verifiez permissions Windows camera, fermeture des applis qui utilisent deja la webcam, "
-                "et testez un autre index dans Network.yaml."
-            )
+        self._candidate_indexes = candidate_indexes
+        self._backend_name_pairs = backend_name_pairs
+        self._open_camera_blocking(initial=True)
 
         base_options = python.BaseOptions(model_asset_path=str(model_path))
         options = vision.FaceLandmarkerOptions(
@@ -205,6 +151,85 @@ class MediaPipeFaceProcessor:
             )
             self.hand_detector = vision.HandLandmarker.create_from_options(hand_options)
 
+    def _try_open_camera(self, index: int, backend_value):
+        cap = cv2.VideoCapture(index) if backend_value is None else cv2.VideoCapture(index, backend_value)
+        if not cap.isOpened():
+            cap.release()
+            return None
+
+        if self._frame_width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._frame_width)
+        if self._frame_height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._frame_height)
+
+        if self._camera_prefer_mjpg:
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                pass
+
+        # Warmup reads improve compatibility on some drivers that need initial frames.
+        frame_ok = False
+        for _ in range(self._camera_warmup_frames):
+            ok, _ = cap.read()
+            if ok:
+                frame_ok = True
+                break
+            time.sleep(0.03)
+
+        if not frame_ok:
+            cap.release()
+            return None
+
+        return cap
+
+    def _release_camera(self):
+        if self.capture is not None:
+            try:
+                self.capture.release()
+            except Exception:
+                pass
+            self.capture = None
+
+    def _open_camera_blocking(self, initial: bool) -> bool:
+        self._release_camera()
+
+        for attempt in range(self._camera_open_retries):
+            for index in self._candidate_indexes:
+                for backend_name, backend_value in self._backend_name_pairs:
+                    cap = self._try_open_camera(index, backend_value)
+                    if cap is None:
+                        continue
+
+                    self.capture = cap
+                    print(
+                        "[MediaPipe] Camera ouverte: "
+                        f"index={index}, backend={backend_name}, attempt={attempt + 1}"
+                    )
+                    return True
+
+            if attempt + 1 < self._camera_open_retries:
+                time.sleep(self._camera_retry_delay_seconds)
+
+        if initial:
+            print(
+                "[MediaPipe] Aucune camera au demarrage. "
+                "Le script continuera a rechercher une camera disponible..."
+            )
+
+        return False
+
+    def _ensure_camera_connected(self) -> bool:
+        if self.capture is not None:
+            return True
+
+        now = time.time()
+        if (now - self._last_reconnect_attempt_ts) < self._camera_runtime_reconnect_interval_seconds:
+            return False
+
+        self._last_reconnect_attempt_ts = now
+        return self._open_camera_blocking(initial=False)
+
     def _is_finger_closed(self, landmarks, tip_idx: int, pip_idx: int, margin: float) -> bool:
         """A finger is considered closed when its tip is clearly below its PIP joint."""
         tip = landmarks[tip_idx]
@@ -239,16 +264,29 @@ class MediaPipeFaceProcessor:
         return dist_tip_to_palm <= (palm_width * closed_ratio)
 
     def get_processed_data(self) -> dict:
+        if not self._ensure_camera_connected():
+            return {
+                "camera_available": 0.0,
+                "face_detected": 0.0,
+            }
+
         ok, frame = self.capture.read()
         if not ok:
-            return {}
+            self._release_camera()
+            return {
+                "camera_available": 0.0,
+                "face_detected": 0.0,
+            }
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         result = self.detector.detect(mp_image)
 
         if not result.face_blendshapes:
-            return {}
+            return {
+                "camera_available": 1.0,
+                "face_detected": 0.0,
+            }
 
         blendshapes = result.face_blendshapes[0]
         scores = {item.category_name: float(item.score) for item in blendshapes}
@@ -329,6 +367,8 @@ class MediaPipeFaceProcessor:
             right_thumb_closed = False
 
         return {
+            "camera_available": 1.0,
+            "face_detected": 1.0,
             "blink": blink_value,
             "gaze_yaw": gaze_yaw,
             "gaze_pitch": gaze_pitch,
@@ -341,7 +381,7 @@ class MediaPipeFaceProcessor:
         }
 
     def stop(self):
-        self.capture.release()
+        self._release_camera()
         if self.hand_detector is not None:
             self.hand_detector.close()
         self.detector.close()
